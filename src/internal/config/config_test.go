@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,5 +172,157 @@ func TestLoadConfigAllowsEmptyOptionalFields(t *testing.T) {
 	}
 	if cfg.Logging.FilePath != "" {
 		t.Fatalf("expected empty logging file path, got %q", cfg.Logging.FilePath)
+	}
+}
+
+func TestLoadConfigKeepsExplicitBooleanFlags(t *testing.T) {
+	cfg, err := Load(strings.NewReader(`{
+		"web_rules":{"enabled":false,"download_on_start":false},
+		"custom_rules":{"enabled":false},
+		"auto_detect":{"enabled":true},
+		"management":{"enabled":false}
+	}`), "/workspace/config.json")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		got  bool
+		want bool
+	}{
+		{name: "web rules enabled", got: cfg.WebRules.Enabled, want: false},
+		{name: "web rules download on start", got: cfg.WebRules.DownloadOnStart, want: false},
+		{name: "custom rules enabled", got: cfg.CustomRules.Enabled, want: false},
+		{name: "auto detect enabled", got: cfg.AutoDetect.Enabled, want: true},
+		{name: "management enabled", got: cfg.Management.Enabled, want: false},
+	}
+
+	for _, tc := range tests {
+		if tc.got != tc.want {
+			t.Fatalf("unexpected %s: got %v want %v", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+func TestLoadConfigKeepsRelativePathsWhenSourcePathIsEmpty(t *testing.T) {
+	cfg, err := Load(strings.NewReader(`{
+		"custom_rules":{"path":"configs/../custom.txt"}
+	}`), "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.CustomRules.Path != filepath.Clean("configs/../custom.txt") {
+		t.Fatalf("unexpected custom rules path: got %q want %q", cfg.CustomRules.Path, filepath.Clean("configs/../custom.txt"))
+	}
+}
+
+func TestLoadConfigReturnsCanonicalizeSourcePathError(t *testing.T) {
+	restore := stubAbsPath(func(string) (string, error) {
+		return "", errors.New("abs failed")
+	})
+	defer restore()
+
+	_, err := Load(strings.NewReader(`{}`), "config.json")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "canonicalize source path: abs failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolvePath(t *testing.T) {
+	absoluteLogPath := filepath.Join(t.TempDir(), "autoproxy.log")
+	tests := []struct {
+		name      string
+		pathValue string
+		baseDir   string
+		want      string
+	}{
+		{name: "empty path", pathValue: "", baseDir: "/workspace", want: ""},
+		{name: "absolute path", pathValue: absoluteLogPath, baseDir: "/workspace", want: absoluteLogPath},
+		{name: "relative path", pathValue: "configs/../custom.txt", baseDir: "/workspace", want: "/workspace/custom.txt"},
+	}
+
+	for _, tc := range tests {
+		if got := resolvePath(tc.pathValue, tc.baseDir); got != tc.want {
+			t.Fatalf("unexpected %s: got %q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestCanonicalizeSourcePath(t *testing.T) {
+	absoluteSourcePath := filepath.Join(t.TempDir(), "configs", "..", "config.json")
+	tests := []struct {
+		name       string
+		sourcePath string
+		prepare    func() func()
+		want       string
+		wantErr    string
+	}{
+		{
+			name:       "empty source path",
+			sourcePath: "",
+			want:       "",
+		},
+		{
+			name:       "absolute source path",
+			sourcePath: absoluteSourcePath,
+			want:       filepath.Clean(absoluteSourcePath),
+		},
+		{
+			name:       "relative source path",
+			sourcePath: "configs/config.json",
+			prepare: func() func() {
+				return stubAbsPath(func(path string) (string, error) {
+					return filepath.Join(string(filepath.Separator), "workspace", path), nil
+				})
+			},
+			want: filepath.Join(string(filepath.Separator), "workspace", "configs", "config.json"),
+		},
+		{
+			name:       "relative source path error",
+			sourcePath: "config.json",
+			prepare: func() func() {
+				return stubAbsPath(func(string) (string, error) {
+					return "", errors.New("abs failed")
+				})
+			},
+			wantErr: "abs failed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := func() {}
+			if tc.prepare != nil {
+				restore = tc.prepare()
+			}
+			defer restore()
+
+			got, err := canonicalizeSourcePath(tc.sourcePath)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("canonicalize source path: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("unexpected canonical path: got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func stubAbsPath(stub func(string) (string, error)) func() {
+	original := absPath
+	absPath = stub
+	return func() {
+		absPath = original
 	}
 }

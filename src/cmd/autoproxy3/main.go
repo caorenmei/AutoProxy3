@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/caorenmei/autoproxy3/src/internal/buildinfo"
@@ -166,18 +165,13 @@ func printHelp(w io.Writer) {
 }
 
 func loadConfigFromPath(path string) (config.Config, error) {
-	resolvedPath, err := filepath.Abs(path)
-	if err != nil {
-		return config.Config{}, fmt.Errorf("resolve config path: %w", err)
-	}
-
-	file, err := os.Open(resolvedPath)
+	file, err := os.Open(path)
 	if err != nil {
 		return config.Config{}, fmt.Errorf("open config file: %w", err)
 	}
 	defer file.Close()
 
-	return config.Load(file, resolvedPath)
+	return config.Load(file, path)
 }
 
 func runServe(args appArgs, cfg config.Config, handler serveHandler) error {

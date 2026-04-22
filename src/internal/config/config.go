@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 )
 
+var absPath = filepath.Abs
+
 // Config 表示 AutoProxy3 的完整运行配置。
 //
 // 该结构聚合代理监听地址、上游代理、规则源、自动探测、
@@ -199,7 +201,11 @@ func Load(r io.Reader, sourcePath string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("canonicalize source path: %w", err)
 	}
-	resolveRelativePaths(&cfg, filepath.Dir(canonicalSourcePath))
+	baseDir := "."
+	if canonicalSourcePath != "" {
+		baseDir = filepath.Dir(canonicalSourcePath)
+	}
+	resolveRelativePaths(&cfg, baseDir)
 	return cfg, nil
 }
 
@@ -250,9 +256,6 @@ func resolvePath(pathValue, baseDir string) string {
 	if pathValue == "" || filepath.IsAbs(pathValue) {
 		return pathValue
 	}
-	if baseDir == "" {
-		return filepath.Clean(pathValue)
-	}
 	return filepath.Clean(filepath.Join(baseDir, pathValue))
 }
 
@@ -263,7 +266,7 @@ func canonicalizeSourcePath(sourcePath string) (string, error) {
 	if filepath.IsAbs(sourcePath) {
 		return filepath.Clean(sourcePath), nil
 	}
-	absolutePath, err := filepath.Abs(sourcePath)
+	absolutePath, err := absPath(sourcePath)
 	if err != nil {
 		return "", err
 	}

@@ -23,24 +23,22 @@ type testCounters struct {
 const expectedHelpText = "Usage: autoproxy3 [--config <path>] [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]\nDefault config path: config.json\n"
 
 func TestRunUsesDefaultCommandHandlers(t *testing.T) {
+	fixtureConfigPath := filepath.Join("testdata", "default-config", "config.json")
 	tests := []struct {
 		name       string
 		args       []string
-		prepare    func(*testing.T)
 		wantCode   int
 		wantStdout string
 		wantStderr string
 	}{
 		{
-			name:     "default serve",
-			args:     []string{"autoproxy3"},
-			prepare:  prepareDefaultConfigFile,
+			name:     "serve with default command",
+			args:     []string{"autoproxy3", "--config", fixtureConfigPath},
 			wantCode: 0,
 		},
 		{
 			name:     "explicit serve",
-			args:     []string{"autoproxy3", "serve"},
-			prepare:  prepareDefaultConfigFile,
+			args:     []string{"autoproxy3", "--config", fixtureConfigPath, "serve"},
 			wantCode: 0,
 		},
 		{
@@ -80,10 +78,6 @@ func TestRunUsesDefaultCommandHandlers(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.prepare != nil {
-				tc.prepare(t)
-			}
-
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 
@@ -586,6 +580,22 @@ func TestLoadConfigFromPathReturnsErrorWhenFileMissing(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFromPathLoadsRelativeFixture(t *testing.T) {
+	cfg, err := loadConfigFromPath(filepath.Join("testdata", "relative-path-config", "config.json"))
+	if err != nil {
+		t.Fatalf("load config from path: %v", err)
+	}
+
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	wantPath := filepath.Join(workingDir, "testdata", "relative-path-config", "custom.txt")
+	if cfg.CustomRules.Path != wantPath {
+		t.Fatalf("unexpected custom rules path: got %q want %q", cfg.CustomRules.Path, wantPath)
+	}
+}
+
 // 此测试会修改进程级状态（os.Args、os.Stdout），因此不能并行执行。
 func TestMainEntryPoint(t *testing.T) {
 	originalArgs := os.Args
@@ -632,23 +642,4 @@ func assertErrorString(t *testing.T, err error, want string) {
 	if err.Error() != want {
 		t.Fatalf("expected error %q, got %q", want, err.Error())
 	}
-}
-
-func prepareDefaultConfigFile(t *testing.T) {
-	t.Helper()
-
-	originalDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("get working directory: %v", err)
-	}
-
-	fixtureDir := filepath.Join(originalDir, "testdata", "default-config")
-	if err := os.Chdir(fixtureDir); err != nil {
-		t.Fatalf("change working directory: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(originalDir); err != nil {
-			t.Fatalf("restore working directory: %v", err)
-		}
-	})
 }
