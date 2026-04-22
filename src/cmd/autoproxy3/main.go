@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/caorenmei/autoproxy3/src/internal/buildinfo"
+	"github.com/caorenmei/autoproxy3/src/internal/config"
 )
 
 type appArgs struct {
@@ -17,7 +18,9 @@ type appArgs struct {
 
 const defaultConfigPath = "config.json"
 
-type serveHandler func(appArgs) error
+type serveHandler func(appArgs, config.Config) error
+
+type configLoader func(string) (config.Config, error)
 
 type reloadRulesHandler func() error
 
@@ -28,12 +31,17 @@ type commandHandlers struct {
 }
 
 type app struct {
-	handlers commandHandlers
+	handlers   commandHandlers
+	loadConfig configLoader
 }
 
 func newApp(handlers commandHandlers) app {
+	return newAppWithConfigLoader(handlers, loadConfigFromPath)
+}
+
+func newAppWithConfigLoader(handlers commandHandlers, loader configLoader) app {
 	if handlers.serve == nil {
-		handlers.serve = func(appArgs) error {
+		handlers.serve = func(appArgs, config.Config) error {
 			return nil
 		}
 	}
@@ -47,7 +55,10 @@ func newApp(handlers commandHandlers) app {
 			return nil
 		}
 	}
-	return app{handlers: handlers}
+	if loader == nil {
+		loader = loadConfigFromPath
+	}
+	return app{handlers: handlers, loadConfig: loader}
 }
 
 func parseArgs(args []string) (appArgs, error) {
@@ -115,7 +126,12 @@ func (a app) run(args []string, stdout, stderr io.Writer) int {
 
 	switch parsed.mode {
 	case "serve":
-		if err := runServe(parsed, a.handlers.serve); err != nil {
+		cfg, err := a.loadConfig(parsed.configPath)
+		if err != nil {
+			fmt.Fprintln(stderr, fmt.Errorf("load config: %w", err))
+			return 1
+		}
+		if err := runServe(parsed, cfg, a.handlers.serve); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -148,11 +164,24 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "Default config path: "+defaultConfigPath)
 }
 
-func runServe(args appArgs, handler serveHandler) error {
+func loadConfigFromPath(path string) (config.Config, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return config.Load(strings.NewReader("{}"), path)
+		}
+		return config.Config{}, fmt.Errorf("open config file: %w", err)
+	}
+	defer file.Close()
+
+	return config.Load(file, path)
+}
+
+func runServe(args appArgs, cfg config.Config, handler serveHandler) error {
 	if handler == nil {
 		return errors.New("serve handler is not configured")
 	}
-	return handler(args)
+	return handler(args, cfg)
 }
 
 func runReloadWebRules(handler reloadRulesHandler) error {

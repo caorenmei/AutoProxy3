@@ -8,10 +8,12 @@ import (
 	"testing"
 
 	"github.com/caorenmei/autoproxy3/src/internal/buildinfo"
+	"github.com/caorenmei/autoproxy3/src/internal/config"
 )
 
 type testCounters struct {
 	serve        int
+	loadConfig   int
 	reloadWeb    int
 	reloadCustom int
 }
@@ -93,13 +95,16 @@ func TestRunUsesDefaultCommandHandlers(t *testing.T) {
 
 func TestAppRunDispatchesCommands(t *testing.T) {
 	serveErr := errors.New("serve failed")
+	configErr := errors.New("load config failed")
 	reloadWebErr := errors.New("reload web failed")
 	reloadCustomErr := errors.New("reload custom failed")
+	wantConfig := config.Config{ListenAddr: "127.0.0.1:8080"}
 
 	tests := []struct {
 		name       string
 		args       []string
 		handlers   commandHandlers
+		loadConfig configLoader
 		wantCode   int
 		wantStdout string
 		wantStderr string
@@ -109,28 +114,52 @@ func TestAppRunDispatchesCommands(t *testing.T) {
 			name: "serve command",
 			args: []string{"autoproxy3", "--config", "custom.json", "serve"},
 			handlers: commandHandlers{
-				serve: func(args appArgs) error {
+				serve: func(args appArgs, cfg config.Config) error {
 					if args.mode != "serve" {
 						t.Fatalf("unexpected serve mode %q", args.mode)
 					}
 					if args.configPath != "custom.json" {
 						t.Fatalf("unexpected config path %q", args.configPath)
 					}
+					if cfg != wantConfig {
+						t.Fatalf("unexpected config: %+v", cfg)
+					}
 					return nil
 				},
 			},
+			loadConfig: func(path string) (config.Config, error) {
+				if path != "custom.json" {
+					t.Fatalf("unexpected config load path %q", path)
+				}
+				return wantConfig, nil
+			},
 			wantCode:   0,
-			wantCounts: testCounters{serve: 1},
+			wantCounts: testCounters{serve: 1, loadConfig: 1},
 		},
 		{
 			name: "serve command error",
 			args: []string{"autoproxy3", "serve"},
 			handlers: commandHandlers{
-				serve: func(appArgs) error { return serveErr },
+				serve: func(appArgs, config.Config) error { return serveErr },
 			},
+			loadConfig: func(string) (config.Config, error) { return config.Config{}, nil },
 			wantCode:   1,
 			wantStderr: "serve failed\n",
-			wantCounts: testCounters{serve: 1},
+			wantCounts: testCounters{serve: 1, loadConfig: 1},
+		},
+		{
+			name: "serve config load error",
+			args: []string{"autoproxy3", "serve"},
+			handlers: commandHandlers{
+				serve: func(appArgs, config.Config) error {
+					t.Fatal("serve handler should not run on load failure")
+					return nil
+				},
+			},
+			loadConfig: func(string) (config.Config, error) { return config.Config{}, configErr },
+			wantCode:   1,
+			wantStderr: "load config: load config failed\n",
+			wantCounts: testCounters{loadConfig: 1},
 		},
 		{
 			name: "reload web rules",
@@ -210,9 +239,9 @@ func TestAppRunDispatchesCommands(t *testing.T) {
 			handlers := tc.handlers
 			if handlers.serve != nil {
 				original := handlers.serve
-				handlers.serve = func(args appArgs) error {
+				handlers.serve = func(args appArgs, cfg config.Config) error {
 					counts.serve++
-					return original(args)
+					return original(args, cfg)
 				}
 			}
 			if handlers.reloadWebRules != nil {
@@ -232,7 +261,15 @@ func TestAppRunDispatchesCommands(t *testing.T) {
 
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
-			gotCode := newApp(handlers).run(tc.args, &stdout, &stderr)
+			loadConfig := tc.loadConfig
+			if loadConfig != nil {
+				original := loadConfig
+				loadConfig = func(path string) (config.Config, error) {
+					counts.loadConfig++
+					return original(path)
+				}
+			}
+			gotCode := newAppWithConfigLoader(handlers, loadConfig).run(tc.args, &stdout, &stderr)
 
 			if gotCode != tc.wantCode {
 				t.Fatalf("expected exit code %d, got %d", tc.wantCode, gotCode)
@@ -304,17 +341,21 @@ func TestRunMain(t *testing.T) {
 func TestRunServe(t *testing.T) {
 	serveErr := errors.New("serve failed")
 	args := appArgs{mode: "serve"}
+	cfg := config.Config{ListenAddr: "127.0.0.1:8080"}
 
 	tests := []struct {
 		name    string
-		handler func(appArgs) error
+		handler func(appArgs, config.Config) error
 		wantErr string
 	}{
 		{
 			name: "success",
-			handler: func(got appArgs) error {
+			handler: func(got appArgs, gotCfg config.Config) error {
 				if got != args {
 					t.Fatalf("unexpected args: %+v", got)
+				}
+				if gotCfg != cfg {
+					t.Fatalf("unexpected config: %+v", gotCfg)
 				}
 				return nil
 			},
@@ -325,14 +366,14 @@ func TestRunServe(t *testing.T) {
 		},
 		{
 			name:    "handler error",
-			handler: func(appArgs) error { return serveErr },
+			handler: func(appArgs, config.Config) error { return serveErr },
 			wantErr: "serve failed",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := runServe(args, tc.handler)
+			err := runServe(args, cfg, tc.handler)
 			assertErrorString(t, err, tc.wantErr)
 		})
 	}
