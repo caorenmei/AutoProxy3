@@ -15,7 +15,7 @@ type appArgs struct {
 func normalizeArgs(args []string) appArgs {
 	if len(args) > 1 {
 		switch args[1] {
-		case "version", "help", "reload_web_rules", "reload_custom_rules", "reload_rules":
+		case "serve", "version", "help", "reload_web_rules", "reload_custom_rules", "reload_rules":
 			return appArgs{mode: args[1]}
 		}
 	}
@@ -27,6 +27,11 @@ func main() {
 	args := normalizeArgs(os.Args)
 
 	switch args.mode {
+	case "serve":
+		if err := runServe(args); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	case "version":
 		fmt.Println(buildinfo.Version)
 	case "help":
@@ -55,7 +60,7 @@ func main() {
 }
 
 func printHelp(w io.Writer) {
-	fmt.Fprintln(w, "Usage: autoproxy3 [version|help|reload_web_rules|reload_custom_rules|reload_rules]")
+	fmt.Fprintln(w, "Usage: autoproxy3 [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]")
 }
 
 func runServe(args appArgs) error {
