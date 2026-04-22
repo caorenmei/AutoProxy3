@@ -49,6 +49,21 @@ func TestParseWebRulesReturnsEmptySet(t *testing.T) {
 	}
 }
 
+func TestParseWebRulesIgnoresCommentAndBlankLines(t *testing.T) {
+	body := base64.StdEncoding.EncodeToString([]byte("[AutoProxy 0.2.9]\n# comment\n\n||twitter.com\n\n# another comment\n@@||apple.com\n"))
+	set, err := ParseWebRules(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("parse web rules: %v", err)
+	}
+
+	if !set.ProxyHost("twitter.com") {
+		t.Fatalf("expected twitter.com to require proxy")
+	}
+	if !set.DirectHost("apple.com") {
+		t.Fatalf("expected apple.com to be direct")
+	}
+}
+
 func TestParseWebRulesSupportsURLPrefix(t *testing.T) {
 	body := base64.StdEncoding.EncodeToString([]byte("[AutoProxy 0.2.9]\n|http://specific-site.com/path\n"))
 	set, err := ParseWebRules(strings.NewReader(body))
