@@ -195,7 +195,11 @@ func Load(r io.Reader, sourcePath string) (Config, error) {
 	}
 
 	applyDefaults(&cfg, raw)
-	resolveRelativePaths(&cfg, filepath.Dir(sourcePath))
+	canonicalSourcePath, err := canonicalizeSourcePath(sourcePath)
+	if err != nil {
+		return Config{}, fmt.Errorf("canonicalize source path: %w", err)
+	}
+	resolveRelativePaths(&cfg, filepath.Dir(canonicalSourcePath))
 	return cfg, nil
 }
 
@@ -250,4 +254,18 @@ func resolvePath(pathValue, baseDir string) string {
 		return filepath.Clean(pathValue)
 	}
 	return filepath.Clean(filepath.Join(baseDir, pathValue))
+}
+
+func canonicalizeSourcePath(sourcePath string) (string, error) {
+	if sourcePath == "" {
+		return "", nil
+	}
+	if filepath.IsAbs(sourcePath) {
+		return filepath.Clean(sourcePath), nil
+	}
+	absolutePath, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(absolutePath), nil
 }

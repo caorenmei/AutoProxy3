@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -34,6 +36,17 @@ func TestLoadConfigAppliesDefaults(t *testing.T) {
 		if tc.got != tc.want {
 			t.Fatalf("unexpected %s: got %v want %v", tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+func TestLoadConfigDefaultsListenAddrWhenOmitted(t *testing.T) {
+	cfg, err := Load(strings.NewReader(`{}`), "/workspace/config.json")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.ListenAddr != "localhost:1080" {
+		t.Fatalf("unexpected listen addr: got %q want %q", cfg.ListenAddr, "localhost:1080")
 	}
 }
 
@@ -92,6 +105,45 @@ func TestLoadConfigKeepsAbsolutePaths(t *testing.T) {
 		if tc.got != tc.want {
 			t.Fatalf("unexpected %s: got %q want %q", tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+func TestLoadConfigResolvesRelativePathsFromRelativeSourcePath(t *testing.T) {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		sourcePath string
+		wantPath   string
+	}{
+		{
+			name:       "config in current directory",
+			sourcePath: "config.json",
+			wantPath:   filepath.Join(workingDir, "custom.txt"),
+		},
+		{
+			name:       "config in nested directory",
+			sourcePath: filepath.Join("configs", "dev.json"),
+			wantPath:   filepath.Join(workingDir, "configs", "custom.txt"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(strings.NewReader(`{
+				"custom_rules":{"path":"custom.txt"}
+			}`), tc.sourcePath)
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+
+			if cfg.CustomRules.Path != tc.wantPath {
+				t.Fatalf("unexpected custom rules path: got %q want %q", cfg.CustomRules.Path, tc.wantPath)
+			}
+		})
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/caorenmei/autoproxy3/src/internal/buildinfo"
@@ -24,6 +26,7 @@ func TestRunUsesDefaultCommandHandlers(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       []string
+		prepare    func(*testing.T)
 		wantCode   int
 		wantStdout string
 		wantStderr string
@@ -31,11 +34,13 @@ func TestRunUsesDefaultCommandHandlers(t *testing.T) {
 		{
 			name:     "default serve",
 			args:     []string{"autoproxy3"},
+			prepare:  prepareDefaultConfigFile,
 			wantCode: 0,
 		},
 		{
 			name:     "explicit serve",
 			args:     []string{"autoproxy3", "serve"},
+			prepare:  prepareDefaultConfigFile,
 			wantCode: 0,
 		},
 		{
@@ -75,6 +80,10 @@ func TestRunUsesDefaultCommandHandlers(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.prepare != nil {
+				tc.prepare(t)
+			}
+
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 
@@ -567,6 +576,16 @@ func TestParseArgs(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFromPathReturnsErrorWhenFileMissing(t *testing.T) {
+	_, err := loadConfigFromPath("does-not-exist.json")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "open config file:") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // 此测试会修改进程级状态（os.Args、os.Stdout），因此不能并行执行。
 func TestMainEntryPoint(t *testing.T) {
 	originalArgs := os.Args
@@ -613,4 +632,23 @@ func assertErrorString(t *testing.T, err error, want string) {
 	if err.Error() != want {
 		t.Fatalf("expected error %q, got %q", want, err.Error())
 	}
+}
+
+func prepareDefaultConfigFile(t *testing.T) {
+	t.Helper()
+
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+
+	fixtureDir := filepath.Join(originalDir, "testdata", "default-config")
+	if err := os.Chdir(fixtureDir); err != nil {
+		t.Fatalf("change working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	})
 }
