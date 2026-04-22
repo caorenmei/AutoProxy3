@@ -12,51 +12,68 @@ type appArgs struct {
 	mode string
 }
 
-func normalizeArgs(args []string) appArgs {
-	if len(args) > 1 {
-		switch args[1] {
-		case "serve", "version", "help", "reload_web_rules", "reload_custom_rules", "reload_rules":
-			return appArgs{mode: args[1]}
-		}
+var (
+	serveCommand             = runServe
+	reloadWebRulesCommand    = runReloadWebRules
+	reloadCustomRulesCommand = runReloadCustomRules
+	reloadRulesCommand       = runReloadRules
+)
+
+func parseArgs(args []string) (appArgs, error) {
+	if len(args) <= 1 {
+		return appArgs{mode: "serve"}, nil
 	}
 
-	return appArgs{mode: "serve"}
+	switch args[1] {
+	case "serve", "version", "help", "reload_web_rules", "reload_custom_rules", "reload_rules":
+		return appArgs{mode: args[1]}, nil
+	default:
+		return appArgs{}, fmt.Errorf("unknown command: %s", args[1])
+	}
 }
 
 func main() {
-	args := normalizeArgs(os.Args)
+	if code := run(os.Args, os.Stdout, os.Stderr); code != 0 {
+		os.Exit(code)
+	}
+}
 
-	switch args.mode {
+func run(args []string, stdout, stderr io.Writer) int {
+	parsed, err := parseArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		printHelp(stderr)
+		return 1
+	}
+
+	switch parsed.mode {
 	case "serve":
-		if err := runServe(args); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+		if err := serveCommand(parsed); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
 		}
 	case "version":
-		fmt.Println(buildinfo.Version)
+		fmt.Fprintln(stdout, buildinfo.Version)
 	case "help":
-		printHelp(os.Stdout)
+		printHelp(stdout)
 	case "reload_web_rules":
-		if err := runReloadWebRules(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+		if err := reloadWebRulesCommand(); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
 		}
 	case "reload_custom_rules":
-		if err := runReloadCustomRules(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+		if err := reloadCustomRulesCommand(); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
 		}
 	case "reload_rules":
-		if err := runReloadRules(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-	default:
-		if err := runServe(args); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+		if err := reloadRulesCommand(); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
 		}
 	}
+
+	return 0
 }
 
 func printHelp(w io.Writer) {
