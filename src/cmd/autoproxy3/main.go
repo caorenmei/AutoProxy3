@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,12 +13,38 @@ type appArgs struct {
 	mode string
 }
 
-var (
-	serveCommand             = runServe
-	reloadWebRulesCommand    = runReloadWebRules
-	reloadCustomRulesCommand = runReloadCustomRules
-	reloadRulesCommand       = runReloadRules
-)
+type serveHandler func(appArgs) error
+
+type reloadRulesHandler func() error
+
+type commandHandlers struct {
+	serve             serveHandler
+	reloadWebRules    reloadRulesHandler
+	reloadCustomRules reloadRulesHandler
+}
+
+type app struct {
+	handlers commandHandlers
+}
+
+func newApp(handlers commandHandlers) app {
+	if handlers.serve == nil {
+		handlers.serve = func(appArgs) error {
+			return nil
+		}
+	}
+	if handlers.reloadWebRules == nil {
+		handlers.reloadWebRules = func() error {
+			return nil
+		}
+	}
+	if handlers.reloadCustomRules == nil {
+		handlers.reloadCustomRules = func() error {
+			return nil
+		}
+	}
+	return app{handlers: handlers}
+}
 
 func parseArgs(args []string) (appArgs, error) {
 	if len(args) <= 1 {
@@ -33,12 +60,20 @@ func parseArgs(args []string) (appArgs, error) {
 }
 
 func main() {
-	if code := run(os.Args, os.Stdout, os.Stderr); code != 0 {
-		os.Exit(code)
+	runMain(os.Args, os.Stdout, os.Stderr, os.Exit)
+}
+
+func runMain(args []string, stdout, stderr io.Writer, exit func(int)) {
+	if code := run(args, stdout, stderr); code != 0 {
+		exit(code)
 	}
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return newApp(commandHandlers{}).run(args, stdout, stderr)
+}
+
+func (a app) run(args []string, stdout, stderr io.Writer) int {
 	parsed, err := parseArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -48,7 +83,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	switch parsed.mode {
 	case "serve":
-		if err := serveCommand(parsed); err != nil {
+		if err := runServe(parsed, a.handlers.serve); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -57,17 +92,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "help":
 		printHelp(stdout)
 	case "reload_web_rules":
-		if err := reloadWebRulesCommand(); err != nil {
+		if err := runReloadWebRules(a.handlers.reloadWebRules); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 	case "reload_custom_rules":
-		if err := reloadCustomRulesCommand(); err != nil {
+		if err := runReloadCustomRules(a.handlers.reloadCustomRules); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 	case "reload_rules":
-		if err := reloadRulesCommand(); err != nil {
+		if err := runReloadRules(a.handlers.reloadWebRules, a.handlers.reloadCustomRules); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -80,19 +115,33 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: autoproxy3 [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]")
 }
 
-func runServe(args appArgs) error {
-	_ = args
-	return nil
+func runServe(args appArgs, handler serveHandler) error {
+	if handler == nil {
+		return errors.New("serve handler is not configured")
+	}
+	return handler(args)
 }
 
-func runReloadWebRules() error {
-	return nil
+func runReloadWebRules(handler reloadRulesHandler) error {
+	if handler == nil {
+		return errors.New("reload web rules handler is not configured")
+	}
+	return handler()
 }
 
-func runReloadCustomRules() error {
-	return nil
+func runReloadCustomRules(handler reloadRulesHandler) error {
+	if handler == nil {
+		return errors.New("reload custom rules handler is not configured")
+	}
+	return handler()
 }
 
-func runReloadRules() error {
+func runReloadRules(reloadWebRules reloadRulesHandler, reloadCustomRules reloadRulesHandler) error {
+	if err := runReloadWebRules(reloadWebRules); err != nil {
+		return fmt.Errorf("reload web rules: %w", err)
+	}
+	if err := runReloadCustomRules(reloadCustomRules); err != nil {
+		return fmt.Errorf("reload custom rules: %w", err)
+	}
 	return nil
 }
