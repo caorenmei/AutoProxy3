@@ -5,13 +5,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/caorenmei/autoproxy3/src/internal/buildinfo"
 )
 
 type appArgs struct {
-	mode string
+	mode       string
+	configPath string
 }
+
+const defaultConfigPath = "config.json"
 
 type serveHandler func(appArgs) error
 
@@ -47,15 +51,43 @@ func newApp(handlers commandHandlers) app {
 }
 
 func parseArgs(args []string) (appArgs, error) {
+	parsed := appArgs{mode: "serve", configPath: defaultConfigPath}
+	commandSet := false
 	if len(args) <= 1 {
-		return appArgs{mode: "serve"}, nil
+		return parsed, nil
 	}
 
-	switch args[1] {
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--config":
+			i++
+			if i >= len(args) {
+				return appArgs{}, errors.New("missing value for --config")
+			}
+			parsed.configPath = args[i]
+		case strings.HasPrefix(arg, "--config="):
+			parsed.configPath = strings.TrimPrefix(arg, "--config=")
+		case isCommand(arg):
+			if commandSet {
+				return appArgs{}, fmt.Errorf("unexpected argument: %s", arg)
+			}
+			parsed.mode = arg
+			commandSet = true
+		default:
+			return appArgs{}, fmt.Errorf("unknown command: %s", arg)
+		}
+	}
+
+	return parsed, nil
+}
+
+func isCommand(arg string) bool {
+	switch arg {
 	case "serve", "version", "help", "reload_web_rules", "reload_custom_rules", "reload_rules":
-		return appArgs{mode: args[1]}, nil
+		return true
 	default:
-		return appArgs{}, fmt.Errorf("unknown command: %s", args[1])
+		return false
 	}
 }
 
@@ -112,7 +144,8 @@ func (a app) run(args []string, stdout, stderr io.Writer) int {
 }
 
 func printHelp(w io.Writer) {
-	fmt.Fprintln(w, "Usage: autoproxy3 [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]")
+	fmt.Fprintln(w, "Usage: autoproxy3 [--config <path>] [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]")
+	fmt.Fprintln(w, "Default config path: "+defaultConfigPath)
 }
 
 func runServe(args appArgs, handler serveHandler) error {

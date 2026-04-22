@@ -16,6 +16,8 @@ type testCounters struct {
 	reloadCustom int
 }
 
+const expectedHelpText = "Usage: autoproxy3 [--config <path>] [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]\nDefault config path: config.json\n"
+
 func TestRunUsesDefaultCommandHandlers(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -38,7 +40,7 @@ func TestRunUsesDefaultCommandHandlers(t *testing.T) {
 			name:       "help",
 			args:       []string{"autoproxy3", "help"},
 			wantCode:   0,
-			wantStdout: "Usage: autoproxy3 [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]\n",
+			wantStdout: expectedHelpText,
 		},
 		{
 			name:       "version",
@@ -65,7 +67,7 @@ func TestRunUsesDefaultCommandHandlers(t *testing.T) {
 			name:       "unknown command",
 			args:       []string{"autoproxy3", "bogus"},
 			wantCode:   1,
-			wantStderr: "unknown command: bogus\nUsage: autoproxy3 [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]\n",
+			wantStderr: "unknown command: bogus\n" + expectedHelpText,
 		},
 	}
 
@@ -105,11 +107,14 @@ func TestAppRunDispatchesCommands(t *testing.T) {
 	}{
 		{
 			name: "serve command",
-			args: []string{"autoproxy3", "serve"},
+			args: []string{"autoproxy3", "--config", "custom.json", "serve"},
 			handlers: commandHandlers{
 				serve: func(args appArgs) error {
 					if args.mode != "serve" {
 						t.Fatalf("unexpected serve mode %q", args.mode)
+					}
+					if args.configPath != "custom.json" {
+						t.Fatalf("unexpected config path %q", args.configPath)
 					}
 					return nil
 				},
@@ -257,14 +262,14 @@ func TestRunMain(t *testing.T) {
 		{
 			name:       "success without exit",
 			args:       []string{"autoproxy3", "help"},
-			wantStdout: "Usage: autoproxy3 [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]\n",
+			wantStdout: expectedHelpText,
 		},
 		{
 			name:       "error triggers exit",
 			args:       []string{"autoproxy3", "bogus"},
 			wantCode:   1,
 			wantExit:   true,
-			wantStderr: "unknown command: bogus\nUsage: autoproxy3 [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]\n",
+			wantStderr: "unknown command: bogus\n" + expectedHelpText,
 		},
 	}
 
@@ -468,7 +473,61 @@ func TestRunReloadRules(t *testing.T) {
 	}
 }
 
-func TestMain(t *testing.T) {
+func TestParseArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    appArgs
+		wantErr string
+	}{
+		{
+			name: "default config",
+			args: []string{"autoproxy3"},
+			want: appArgs{mode: "serve", configPath: "config.json"},
+		},
+		{
+			name: "config path flag",
+			args: []string{"autoproxy3", "--config", "custom.json"},
+			want: appArgs{mode: "serve", configPath: "custom.json"},
+		},
+		{
+			name: "config equals flag",
+			args: []string{"autoproxy3", "--config=custom.json"},
+			want: appArgs{mode: "serve", configPath: "custom.json"},
+		},
+		{
+			name:    "unknown command",
+			args:    []string{"autoproxy3", "bogus"},
+			wantErr: "unknown command: bogus",
+		},
+		{
+			name:    "config flag missing value",
+			args:    []string{"autoproxy3", "--config"},
+			wantErr: "missing value for --config",
+		},
+		{
+			name:    "duplicate command",
+			args:    []string{"autoproxy3", "serve", "serve"},
+			wantErr: "unexpected argument: serve",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseArgs(tc.args)
+			assertErrorString(t, err, tc.wantErr)
+			if err != nil {
+				return
+			}
+			if got != tc.want {
+				t.Fatalf("unexpected args: got %+v want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// 此测试会修改进程级状态（os.Args、os.Stdout），因此不能并行执行。
+func TestMainEntryPoint(t *testing.T) {
 	originalArgs := os.Args
 	originalStdout := os.Stdout
 	defer func() {
@@ -494,7 +553,7 @@ func TestMain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read stdout: %v", err)
 	}
-	if string(output) != "Usage: autoproxy3 [serve|version|help|reload_web_rules|reload_custom_rules|reload_rules]\n" {
+	if string(output) != expectedHelpText {
 		t.Fatalf("unexpected stdout: %q", string(output))
 	}
 }
