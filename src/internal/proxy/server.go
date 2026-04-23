@@ -222,7 +222,7 @@ func (s *Server) forwardHTTPRequest(r *http.Request, targetHost, targetAddr stri
 		return resp, false, nil
 	}
 
-	if !s.shouldAutoDetect(decision, targetHost, useUpstream) {
+	if !s.shouldAutoDetect(decision, targetHost, useUpstream) || !isTCPDialFailure(err) {
 		return nil, false, err
 	}
 
@@ -325,6 +325,15 @@ func (s *Server) resolveProxyUsage(decision rules.Decision, targetHost string) b
 
 func (s *Server) shouldAutoDetect(decision rules.Decision, targetHost string, useUpstream bool) bool {
 	return s.autoDetectEnabled && s.autoDetectRecorder != nil && !useUpstream && s.upstreamProxy != "" && decision.Source == rules.DecisionSourceDefault && targetHost != ""
+}
+
+func isTCPDialFailure(err error) bool {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		return false
+	}
+
+	return opErr.Op == "dial" && strings.HasPrefix(opErr.Net, "tcp")
 }
 
 func (s *Server) persistAutoDetectHost(ctx context.Context, host string) {

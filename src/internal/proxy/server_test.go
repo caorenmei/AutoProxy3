@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -269,6 +270,88 @@ func TestServerAutoDetectDoesNotTriggerOnHTTPStatusErrors(t *testing.T) {
 	}
 	if recorder.Count() != 0 {
 		t.Fatalf("expected no auto-detect record, got %d", recorder.Count())
+	}
+}
+
+func TestServerAutoDetectDoesNotTriggerOnNonTCPRoundTripErrors(t *testing.T) {
+	recorder := &memoryRecorder{}
+	var calls atomic.Int32
+	server := NewServer(Options{
+		Engine:                rules.NewEngine(),
+		Logger:                newTestLogger(io.Discard),
+		UpstreamProxy:         "127.0.0.1:1",
+		AutoDetectEnabled:     true,
+		AutoDetectMaxAttempts: 1,
+		AutoDetectRecorder:    recorder,
+		NewRoundTripper: func(DialContext) http.RoundTripper {
+			return roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				if calls.Add(1) == 1 {
+					return nil, errors.New("application layer failure")
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("unexpected-fallback")),
+				}, nil
+			})
+		},
+	})
+	proxyServer := httptest.NewServer(server)
+	defer proxyServer.Close()
+
+	resp, body := mustDoProxyRequest(t, proxyServer.URL, "http://roundtrip-error.example/test")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", resp.StatusCode)
+	}
+	if strings.Contains(body, "unexpected-fallback") {
+		t.Fatalf("unexpected fallback response body: %q", body)
+	}
+	if recorder.Count() != 0 {
+		t.Fatalf("expected no auto-detect record, got %d", recorder.Count())
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected 1 RoundTrip call, got %d", got)
+	}
+}
+
+func TestServerAutoDetectTriggersOnDirectTCPDialFailureInHTTPPath(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "tcp-fallback-ok")
+	}))
+	defer target.Close()
+
+	recorder := &memoryRecorder{}
+	upstream := newFakeUpstream(t, map[string]string{"tcp-failure.example:80": strings.TrimPrefix(target.URL, "http://")})
+	defer upstream.Close()
+
+	server := NewServer(Options{
+		Engine:                rules.NewEngine(),
+		Logger:                newTestLogger(io.Discard),
+		UpstreamProxy:         upstream.Address(),
+		AutoDetectEnabled:     true,
+		AutoDetectMaxAttempts: 1,
+		AutoDetectRecorder:    recorder,
+		DialContext:           failingDialerForHost(t, "tcp-failure.example"),
+	})
+	proxyServer := httptest.NewServer(server)
+	defer proxyServer.Close()
+
+	resp, body := mustDoProxyRequest(t, proxyServer.URL, "http://tcp-failure.example/test")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if body != "tcp-fallback-ok" {
+		t.Fatalf("unexpected body: %q", body)
+	}
+	if recorder.Count() != 1 || recorder.LastHost() != "tcp-failure.example" {
+		t.Fatalf("unexpected recorder state: count=%d host=%q", recorder.Count(), recorder.LastHost())
+	}
+	if got := upstream.ConnectCount("tcp-failure.example:80"); got != 1 {
+		t.Fatalf("expected 1 upstream CONNECT, got %d", got)
 	}
 }
 
@@ -617,8 +700,14 @@ func failingDialerForHost(t *testing.T, blockedHost string) DialContext {
 			t.Fatalf("split host port in test dialer: %v", err)
 		}
 		if host == blockedHost {
-			return nil, errors.New("dial failed")
+			return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.ECONNREFUSED}
 		}
 		return dialer(ctx, network, addr)
 	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
