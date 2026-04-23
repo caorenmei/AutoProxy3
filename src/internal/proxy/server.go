@@ -55,16 +55,17 @@ type Options struct {
 // Server 同时支持普通 HTTP 代理请求与 CONNECT 隧道请求，并根据规则引擎结果
 // 在直连、上游 CONNECT 转发以及自动探测回退之间做出选择。
 type Server struct {
-	engine              *rules.Engine
-	logger              *slog.Logger
-	upstreamProxy       string
-	autoDetectEnabled   bool
-	autoDetectMaxCounts int
-	autoDetectRecorder  AutoDetectRecorder
-	dialContext         DialContext
-	upstreamDialContext DialContext
-	newRoundTripper     RoundTripperFactory
-	sharedRoundTripper  http.RoundTripper
+	engine               *rules.Engine
+	logger               *slog.Logger
+	upstreamProxy        string
+	autoDetectEnabled    bool
+	autoDetectMaxCounts  int
+	autoDetectRecorder   AutoDetectRecorder
+	dialContext          DialContext
+	upstreamDialContext  DialContext
+	newRoundTripper      RoundTripperFactory
+	directRoundTripper   http.RoundTripper
+	upstreamRoundTripper http.RoundTripper
 
 	attemptMu sync.Mutex
 	attempts  map[string]int
@@ -96,10 +97,12 @@ func NewServer(opts Options) *Server {
 	}
 
 	newRoundTripper := opts.NewRoundTripper
-	var sharedRoundTripper http.RoundTripper
+	var directRoundTripper http.RoundTripper
+	var upstreamRoundTripper http.RoundTripper
 	if newRoundTripper == nil {
 		newRoundTripper = defaultRoundTripper
-		sharedRoundTripper = newRoundTripper(nil)
+		directRoundTripper = newRoundTripper(nil)
+		upstreamRoundTripper = newRoundTripper(nil)
 	}
 
 	maxAttempts := opts.AutoDetectMaxAttempts
@@ -108,17 +111,18 @@ func NewServer(opts Options) *Server {
 	}
 
 	return &Server{
-		engine:              engine,
-		logger:              logger,
-		upstreamProxy:       strings.TrimSpace(opts.UpstreamProxy),
-		autoDetectEnabled:   opts.AutoDetectEnabled,
-		autoDetectMaxCounts: maxAttempts,
-		autoDetectRecorder:  opts.AutoDetectRecorder,
-		dialContext:         dialContext,
-		upstreamDialContext: upstreamDialContext,
-		newRoundTripper:     newRoundTripper,
-		sharedRoundTripper:  sharedRoundTripper,
-		attempts:            make(map[string]int),
+		engine:               engine,
+		logger:               logger,
+		upstreamProxy:        strings.TrimSpace(opts.UpstreamProxy),
+		autoDetectEnabled:    opts.AutoDetectEnabled,
+		autoDetectMaxCounts:  maxAttempts,
+		autoDetectRecorder:   opts.AutoDetectRecorder,
+		dialContext:          dialContext,
+		upstreamDialContext:  upstreamDialContext,
+		newRoundTripper:      newRoundTripper,
+		directRoundTripper:   directRoundTripper,
+		upstreamRoundTripper: upstreamRoundTripper,
+		attempts:             make(map[string]int),
 	}
 }
 
@@ -279,10 +283,17 @@ func (s *Server) roundTrip(r *http.Request, targetAddr string, useUpstream bool)
 
 	request := cloneRequest(r)
 	request = request.WithContext(withRequestDial(request.Context(), dial))
-	if s.sharedRoundTripper != nil {
-		return s.sharedRoundTripper.RoundTrip(request)
+	if roundTripper := s.sharedRoundTripper(useUpstream); roundTripper != nil {
+		return roundTripper.RoundTrip(request)
 	}
 	return s.newRoundTripper(dial).RoundTrip(request)
+}
+
+func (s *Server) sharedRoundTripper(useUpstream bool) http.RoundTripper {
+	if useUpstream {
+		return s.upstreamRoundTripper
+	}
+	return s.directRoundTripper
 }
 
 func (s *Server) dialTarget(ctx context.Context, targetAddr string, useUpstream bool) (net.Conn, error) {

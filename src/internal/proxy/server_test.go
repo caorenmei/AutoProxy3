@@ -721,6 +721,271 @@ func TestServerHTTPDefaultTransportReusesUpstreamTunnel(t *testing.T) {
 	}
 }
 
+func TestServerHTTPDefaultTransportSwitchesPoolsAfterRuleRefresh(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "route-switch-ok")
+	}))
+	defer target.Close()
+
+	targetURL, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatalf("parse target URL: %v", err)
+	}
+
+	upstream := newFakeUpstream(t, map[string]string{targetURL.Host: targetURL.Host})
+	defer upstream.Close()
+
+	engine := rules.NewEngine()
+	server := NewServer(Options{
+		Engine:        engine,
+		Logger:        newTestLogger(io.Discard),
+		UpstreamProxy: upstream.Address(),
+	})
+	proxyServer := httptest.NewServer(server)
+	defer proxyServer.Close()
+
+	resp1, body1 := mustDoProxyRequest(t, proxyServer.URL, target.URL+"/direct")
+	defer resp1.Body.Close()
+	if body1 != "route-switch-ok" {
+		t.Fatalf("unexpected first body: %q", body1)
+	}
+	if got := upstream.ConnectCount(targetURL.Host); got != 0 {
+		t.Fatalf("expected first request to stay direct, got %d upstream CONNECT calls", got)
+	}
+
+	engine.ReplaceCustomRules(newHostRuleSet(t, targetURL.Hostname()))
+
+	resp2, body2 := mustDoProxyRequest(t, proxyServer.URL, target.URL+"/upstream")
+	defer resp2.Body.Close()
+	if body2 != "route-switch-ok" {
+		t.Fatalf("unexpected second body: %q", body2)
+	}
+	if got := upstream.ConnectCount(targetURL.Host); got != 1 {
+		t.Fatalf("expected rule refresh to force a new upstream CONNECT, got %d", got)
+	}
+}
+
+func TestConnectViaUpstreamReturnsDialError(t *testing.T) {
+	want := errors.New("dial upstream failed")
+	server := NewServer(Options{
+		Logger:        newTestLogger(io.Discard),
+		UpstreamProxy: "127.0.0.1:1080",
+		UpstreamDialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, want
+		},
+	})
+
+	_, err := server.connectViaUpstream(context.Background(), "example.com:80")
+	if !errors.Is(err, want) {
+		t.Fatalf("expected dial error %v, got %v", want, err)
+	}
+}
+
+func TestConnectViaUpstreamReturnsErrorOnNon200Response(t *testing.T) {
+	upstreamAddr, closeUpstream := startScriptedUpstream(t, func(conn net.Conn) {
+		defer conn.Close()
+		_, _ = io.WriteString(conn, "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n")
+	})
+	defer closeUpstream()
+
+	server := NewServer(Options{
+		Logger:        newTestLogger(io.Discard),
+		UpstreamProxy: upstreamAddr,
+	})
+
+	_, err := server.connectViaUpstream(context.Background(), "example.com:80")
+	if err == nil || !strings.Contains(err.Error(), "407 Proxy Authentication Required") {
+		t.Fatalf("expected 407 CONNECT failure, got %v", err)
+	}
+}
+
+func TestConnectViaUpstreamReturnsErrorOnTruncatedResponse(t *testing.T) {
+	upstreamAddr, closeUpstream := startScriptedUpstream(t, func(conn net.Conn) {
+		defer conn.Close()
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\nContent-Length")
+	})
+	defer closeUpstream()
+
+	server := NewServer(Options{
+		Logger:        newTestLogger(io.Discard),
+		UpstreamProxy: upstreamAddr,
+	})
+
+	_, err := server.connectViaUpstream(context.Background(), "example.com:80")
+	if err == nil {
+		t.Fatal("expected truncated upstream response error")
+	}
+}
+
+func TestConnectViaUpstreamRequiresConfiguredProxy(t *testing.T) {
+	server := NewServer(Options{Logger: newTestLogger(io.Discard)})
+
+	_, err := server.connectViaUpstream(context.Background(), "example.com:80")
+	if err == nil || !strings.Contains(err.Error(), "upstream proxy is not configured") {
+		t.Fatalf("expected missing upstream proxy error, got %v", err)
+	}
+}
+
+func TestServeHTTPRejectsInvalidTargets(t *testing.T) {
+	server := NewServer(Options{Logger: newTestLogger(io.Discard)})
+
+	httpRecorder := httptest.NewRecorder()
+	server.ServeHTTP(httpRecorder, &http.Request{Method: http.MethodGet, URL: &url.URL{}})
+	if httpRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected HTTP bad request, got %d", httpRecorder.Code)
+	}
+
+	connectRecorder := httptest.NewRecorder()
+	server.ServeHTTP(connectRecorder, &http.Request{Method: http.MethodConnect, URL: &url.URL{}})
+	if connectRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected CONNECT bad request, got %d", connectRecorder.Code)
+	}
+}
+
+func TestHandleConnectReturnsInternalErrorWhenHijackUnsupported(t *testing.T) {
+	targetAddr, closeTarget := startEchoServer(t)
+	defer closeTarget()
+
+	server := NewServer(Options{
+		Logger: newTestLogger(io.Discard),
+	})
+
+	req := &http.Request{
+		Method: http.MethodConnect,
+		Host:   targetAddr,
+		URL:    &url.URL{Host: targetAddr},
+	}
+	recorder := httptest.NewRecorder()
+	server.handleConnect(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 when hijack unsupported, got %d", recorder.Code)
+	}
+}
+
+func TestTargetHelpersNormalizeHostsAndPorts(t *testing.T) {
+	httpReq := &http.Request{
+		URL:  &url.URL{Scheme: "https", Host: "Example.COM"},
+		Host: "ignored.example",
+	}
+	host, addr, err := httpTarget(httpReq)
+	if err != nil {
+		t.Fatalf("httpTarget returned error: %v", err)
+	}
+	if host != "example.com" || addr != "example.com:443" {
+		t.Fatalf("unexpected https target: %q %q", host, addr)
+	}
+
+	connectReq := &http.Request{URL: &url.URL{}, RequestURI: "[2001:db8::1]"}
+	host, addr, err = connectTarget(connectReq)
+	if err != nil {
+		t.Fatalf("connectTarget returned error: %v", err)
+	}
+	if host != "2001:db8::1" || addr != "[2001:db8::1]:443" {
+		t.Fatalf("unexpected CONNECT target: %q %q", host, addr)
+	}
+
+	host, addr, err = splitTarget("Example.COM:8443", "80")
+	if err != nil {
+		t.Fatalf("splitTarget returned error: %v", err)
+	}
+	if host != "example.com" || addr != "example.com:8443" {
+		t.Fatalf("unexpected split target: %q %q", host, addr)
+	}
+
+	if normalized := normalizeHost("[Example.COM.]"); normalized != "example.com" {
+		t.Fatalf("unexpected normalized host: %q", normalized)
+	}
+	if port := defaultPortForScheme(" ftp ", "21"); port != "21" {
+		t.Fatalf("unexpected fallback port: %q", port)
+	}
+}
+
+func TestResolveDialContextUsesRequestScopedDialer(t *testing.T) {
+	resolved := resolveDialContext(nil)
+	if _, err := resolved(context.Background(), "tcp", "example.com:80"); err == nil {
+		t.Fatal("expected missing request dial context error")
+	}
+
+	want := errors.New("request scoped dialer")
+	ctx := withRequestDial(context.Background(), func(context.Context, string, string) (net.Conn, error) {
+		return nil, want
+	})
+	if _, err := resolved(ctx, "tcp", "example.com:80"); !errors.Is(err, want) {
+		t.Fatalf("expected request dialer error %v, got %v", want, err)
+	}
+}
+
+func TestBufferedConnAndTunnelHelpers(t *testing.T) {
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+
+	conn := &halfCloseConn{Conn: left}
+	buffered := newBufferedConn(conn, strings.NewReader("hi"))
+
+	data, err := io.ReadAll(buffered)
+	if err != nil {
+		t.Fatalf("read buffered conn: %v", err)
+	}
+	if string(data) != "hi" {
+		t.Fatalf("unexpected buffered data: %q", string(data))
+	}
+
+	if err := buffered.(interface{ CloseRead() error }).CloseRead(); err != nil {
+		t.Fatalf("close read: %v", err)
+	}
+	if err := buffered.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
+		t.Fatalf("close write: %v", err)
+	}
+	if conn.readClosed != 1 || conn.writeClosed != 1 {
+		t.Fatalf("expected buffered conn to delegate close calls, got read=%d write=%d", conn.readClosed, conn.writeClosed)
+	}
+
+	closeWriter(conn)
+	closeReader(conn)
+	if conn.readClosed != 2 || conn.writeClosed != 2 {
+		t.Fatalf("expected helper close calls, got read=%d write=%d", conn.readClosed, conn.writeClosed)
+	}
+
+	if tunnelForwardSucceeded() {
+		t.Fatal("expected empty tunnel result to fail")
+	}
+	if tunnelForwardSucceeded(tunnelCopyResult{bytes: 1}, tunnelCopyResult{bytes: 0}) {
+		t.Fatal("expected zero-byte tunnel result to fail")
+	}
+	if tunnelForwardSucceeded(tunnelCopyResult{bytes: 1}, tunnelCopyResult{bytes: 1, err: io.EOF}) {
+		t.Fatal("expected tunnel error to fail")
+	}
+	if !tunnelForwardSucceeded(tunnelCopyResult{bytes: 1}, tunnelCopyResult{bytes: 2}) {
+		t.Fatal("expected successful tunnel results to pass")
+	}
+}
+
+func TestTargetHelpersRejectEmptyHostsAndAllowNoopHalfClose(t *testing.T) {
+	if _, _, err := splitTarget("   ", "80"); err == nil {
+		t.Fatal("expected splitTarget to reject empty host")
+	}
+	if normalized := normalizeHost(" Example.COM:443 "); normalized != "example.com" {
+		t.Fatalf("unexpected normalized host with port: %q", normalized)
+	}
+	if normalizeHost("   ") != "" {
+		t.Fatal("expected empty normalized host")
+	}
+
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+
+	buffered := newBufferedConn(right, strings.NewReader(""))
+	if err := buffered.(interface{ CloseRead() error }).CloseRead(); err != nil {
+		t.Fatalf("expected noop CloseRead to succeed, got %v", err)
+	}
+	if err := buffered.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
+		t.Fatalf("expected noop CloseWrite to succeed, got %v", err)
+	}
+}
+
 type memoryRecorder struct {
 	mu    sync.Mutex
 	hosts []string
@@ -853,6 +1118,22 @@ type connResponseWriter struct {
 	conn net.Conn
 }
 
+type halfCloseConn struct {
+	net.Conn
+	readClosed  int
+	writeClosed int
+}
+
+func (c *halfCloseConn) CloseRead() error {
+	c.readClosed++
+	return nil
+}
+
+func (c *halfCloseConn) CloseWrite() error {
+	c.writeClosed++
+	return nil
+}
+
 func newResponseWriter(conn net.Conn) connResponseWriter {
 	return connResponseWriter{conn: conn}
 }
@@ -867,6 +1148,32 @@ func (w connResponseWriter) Write(data []byte) (int, error) {
 
 func (w connResponseWriter) WriteHeader(statusCode int) {
 	fmt.Fprintf(w.conn, "HTTP/1.1 %d %s\r\nContent-Length: 0\r\n\r\n", statusCode, http.StatusText(statusCode))
+}
+
+func startScriptedUpstream(t *testing.T, handler func(net.Conn)) (string, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen scripted upstream: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go handler(conn)
+		}
+	}()
+
+	return listener.Addr().String(), func() {
+		_ = listener.Close()
+		<-done
+	}
 }
 
 func startEchoServer(t *testing.T) (string, func()) {
