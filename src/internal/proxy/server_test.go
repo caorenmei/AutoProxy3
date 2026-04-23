@@ -986,6 +986,300 @@ func TestTargetHelpersRejectEmptyHostsAndAllowNoopHalfClose(t *testing.T) {
 	}
 }
 
+func TestNewServerAppliesDefaultLoggerAndIgnoresEmptyReset(t *testing.T) {
+	server := NewServer(Options{})
+	if server.logger == nil {
+		t.Fatal("expected default logger to be created")
+	}
+
+	server.attempts["example.com"] = 2
+	server.resetAttempts("")
+	if got := server.attempts["example.com"]; got != 2 {
+		t.Fatalf("expected attempts to remain unchanged, got %d", got)
+	}
+}
+
+func TestResolveDialContextUsesProvidedFallback(t *testing.T) {
+	want := errors.New("fallback dialer")
+	resolved := resolveDialContext(func(context.Context, string, string) (net.Conn, error) {
+		return nil, want
+	})
+
+	if _, err := resolved(context.Background(), "tcp", "example.com:80"); !errors.Is(err, want) {
+		t.Fatalf("expected fallback error %v, got %v", want, err)
+	}
+}
+
+func TestConnectionTokensSkipsEmptyValues(t *testing.T) {
+	tokens := connectionTokens([]string{" keep-alive, , upgrade ,  "})
+	if len(tokens) != 2 {
+		t.Fatalf("expected 2 tokens, got %d", len(tokens))
+	}
+	if tokens[0] != "Keep-Alive" || tokens[1] != "Upgrade" {
+		t.Fatalf("unexpected tokens: %#v", tokens)
+	}
+}
+
+func TestCloseHelpersIgnoreTargetsWithoutHalfClose(t *testing.T) {
+	closeWriter(struct{}{})
+	closeReader(struct{}{})
+}
+
+func TestSplitTargetRejectsMissingHosts(t *testing.T) {
+	if _, _, err := splitTarget(":80", "443"); err == nil {
+		t.Fatal("expected missing host error for host:port target")
+	}
+	if _, _, err := splitTarget("[]", "443"); err == nil {
+		t.Fatal("expected missing host error for bracket target")
+	}
+}
+
+func TestHandleHTTPLogsBodyCopyFailure(t *testing.T) {
+	var logs bytes.Buffer
+	server := NewServer(Options{
+		Logger: newTestLogger(&logs),
+		NewRoundTripper: func(DialContext) http.RoundTripper {
+			return roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("payload")),
+				}, nil
+			})
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/test", nil)
+	writer := &failingResponseWriter{header: make(http.Header), writeErr: errors.New("write failed")}
+	server.handleHTTP(writer, req)
+
+	if writer.code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", writer.code)
+	}
+	if !strings.Contains(logs.String(), "copy response body") {
+		t.Fatalf("expected copy response body log, got %q", logs.String())
+	}
+}
+
+func TestHandleConnectReturnsBadGatewayWhenHijackFails(t *testing.T) {
+	targetConn := &stubConn{}
+	server := NewServer(Options{
+		Logger: newTestLogger(io.Discard),
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return targetConn, nil
+		},
+	})
+
+	req := &http.Request{
+		Method: http.MethodConnect,
+		Host:   "example.com:443",
+		URL:    &url.URL{Host: "example.com:443"},
+	}
+	writer := &hijackableResponseWriter{
+		header:    make(http.Header),
+		hijackErr: errors.New("hijack failed"),
+	}
+	server.handleConnect(writer, req)
+
+	if writer.code != http.StatusBadGateway {
+		t.Fatalf("expected status 502, got %d", writer.code)
+	}
+	if !targetConn.closed {
+		t.Fatal("expected target connection to be closed")
+	}
+}
+
+func TestHandleConnectLogsClientWriteFailure(t *testing.T) {
+	targetConn := &stubConn{}
+	clientConn := &stubConn{writeErr: errors.New("write failed")}
+	server := NewServer(Options{
+		Logger: newTestLogger(io.Discard),
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return targetConn, nil
+		},
+	})
+
+	req := &http.Request{
+		Method: http.MethodConnect,
+		Host:   "example.com:443",
+		URL:    &url.URL{Host: "example.com:443"},
+	}
+	writer := &hijackableResponseWriter{
+		header:   make(http.Header),
+		conn:     clientConn,
+		buffered: bufio.NewReadWriter(bufio.NewReader(strings.NewReader("")), bufio.NewWriter(io.Discard)),
+	}
+	server.handleConnect(writer, req)
+
+	if !clientConn.closed {
+		t.Fatal("expected client connection to be closed")
+	}
+}
+
+func TestHandleConnectLogsBufferedFlushFailure(t *testing.T) {
+	var logs bytes.Buffer
+	targetConn := &stubConn{writeErr: errors.New("flush failed")}
+	clientConn := &stubConn{}
+	reader := bufio.NewReader(strings.NewReader("hello"))
+	if _, err := reader.Peek(len("hello")); err != nil {
+		t.Fatalf("peek buffered data: %v", err)
+	}
+
+	server := NewServer(Options{
+		Logger: newTestLogger(&logs),
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return targetConn, nil
+		},
+	})
+
+	req := &http.Request{
+		Method: http.MethodConnect,
+		Host:   "example.com:443",
+		URL:    &url.URL{Host: "example.com:443"},
+	}
+	writer := &hijackableResponseWriter{
+		header:   make(http.Header),
+		conn:     clientConn,
+		buffered: bufio.NewReadWriter(reader, bufio.NewWriter(io.Discard)),
+	}
+	server.handleConnect(writer, req)
+
+	if !strings.Contains(logs.String(), "flush buffered CONNECT bytes") {
+		t.Fatalf("expected buffered flush log, got %q", logs.String())
+	}
+}
+
+func TestForwardHTTPRequestReturnsUpstreamFallbackError(t *testing.T) {
+	var calls int
+	server := NewServer(Options{
+		Logger:                newTestLogger(io.Discard),
+		UpstreamProxy:         "127.0.0.1:1",
+		AutoDetectEnabled:     true,
+		AutoDetectMaxAttempts: 1,
+		AutoDetectRecorder:    &memoryRecorder{},
+		NewRoundTripper: func(DialContext) http.RoundTripper {
+			return roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 {
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+				}
+				return nil, errors.New("upstream roundtrip failed")
+			})
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/test", nil)
+	resp, fromAutoDetect, err := server.forwardHTTPRequest(
+		req,
+		"example.com",
+		"example.com:80",
+		rules.Decision{Source: rules.DecisionSourceDefault},
+		false,
+	)
+
+	if resp != nil {
+		t.Fatalf("expected nil response, got %#v", resp)
+	}
+	if fromAutoDetect {
+		t.Fatal("expected auto-detect flag to remain false")
+	}
+	if err == nil || err.Error() != "upstream roundtrip failed" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOpenTunnelReturnsUpstreamFallbackError(t *testing.T) {
+	server := NewServer(Options{
+		Logger:                newTestLogger(io.Discard),
+		UpstreamProxy:         "127.0.0.1:1",
+		AutoDetectEnabled:     true,
+		AutoDetectMaxAttempts: 1,
+		AutoDetectRecorder:    &memoryRecorder{},
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+		},
+		UpstreamDialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("upstream dial failed")
+		},
+	})
+
+	conn, fromAutoDetect, err := server.openTunnel(
+		context.Background(),
+		"example.com",
+		"example.com:443",
+		rules.Decision{Source: rules.DecisionSourceDefault},
+		false,
+	)
+
+	if conn != nil {
+		t.Fatalf("expected nil connection, got %#v", conn)
+	}
+	if fromAutoDetect {
+		t.Fatal("expected auto-detect flag to remain false")
+	}
+	if err == nil || err.Error() != "upstream dial failed" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOpenTunnelReturnsDirectErrorBeforeAutoDetectThreshold(t *testing.T) {
+	server := NewServer(Options{
+		Logger:                newTestLogger(io.Discard),
+		UpstreamProxy:         "127.0.0.1:1",
+		AutoDetectEnabled:     true,
+		AutoDetectMaxAttempts: 2,
+		AutoDetectRecorder:    &memoryRecorder{},
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+		},
+		UpstreamDialContext: func(context.Context, string, string) (net.Conn, error) {
+			t.Fatal("expected upstream dial to stay below threshold")
+			return nil, nil
+		},
+	})
+
+	conn, fromAutoDetect, err := server.openTunnel(
+		context.Background(),
+		"example.com",
+		"example.com:443",
+		rules.Decision{Source: rules.DecisionSourceDefault},
+		false,
+	)
+
+	if conn != nil {
+		t.Fatalf("expected nil connection, got %#v", conn)
+	}
+	if fromAutoDetect {
+		t.Fatal("expected auto-detect flag to remain false")
+	}
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("expected dial error, got %v", err)
+	}
+	if got := server.attempts["example.com"]; got != 1 {
+		t.Fatalf("expected one recorded failure, got %d", got)
+	}
+}
+
+func TestConnectViaUpstreamReturnsRequestWriteError(t *testing.T) {
+	upstreamConn := &stubConn{writeErr: errors.New("write failed")}
+	server := NewServer(Options{
+		Logger:        newTestLogger(io.Discard),
+		UpstreamProxy: "127.0.0.1:1",
+		UpstreamDialContext: func(context.Context, string, string) (net.Conn, error) {
+			return upstreamConn, nil
+		},
+	})
+
+	_, err := server.connectViaUpstream(context.Background(), "example.com:443")
+	if err == nil || err.Error() != "write failed" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !upstreamConn.closed {
+		t.Fatal("expected upstream connection to be closed")
+	}
+}
+
 type memoryRecorder struct {
 	mu    sync.Mutex
 	hosts []string
@@ -1334,14 +1628,15 @@ func mustOpenTunnel(t *testing.T, proxyAddress string, targetAddr string) net.Co
 		t.Fatalf("write CONNECT request: %v", err)
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		t.Fatalf("read CONNECT response: %v", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected CONNECT 200, got %d", resp.StatusCode)
 	}
-	return conn
+	return newBufferedConn(conn, reader)
 }
 
 func mustOpenTunnelResponse(t *testing.T, proxyAddress string, targetAddr string) (*http.Response, net.Conn) {
@@ -1360,11 +1655,50 @@ func mustOpenTunnelResponse(t *testing.T, proxyAddress string, targetAddr string
 		t.Fatalf("write CONNECT request: %v", err)
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		t.Fatalf("read CONNECT response: %v", err)
 	}
-	return resp, conn
+	return resp, newBufferedConn(conn, reader)
+}
+
+func TestMustOpenTunnelPreservesBufferedHandshakeBytes(t *testing.T) {
+	const payload = "hello-after-connect"
+	proxyAddress, closeProxy := startScriptedUpstream(t, func(conn net.Conn) {
+		defer conn.Close()
+
+		reader := bufio.NewReader(conn)
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			t.Errorf("read CONNECT request: %v", err)
+			return
+		}
+		if req.Method != http.MethodConnect {
+			t.Errorf("unexpected method: %s", req.Method)
+			return
+		}
+
+		if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"+payload); err != nil {
+			t.Errorf("write handshake response: %v", err)
+		}
+	})
+	defer closeProxy()
+
+	conn := mustOpenTunnel(t, "http://"+proxyAddress, "example.com:443")
+	defer conn.Close()
+
+	if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	buffer := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, buffer); err != nil {
+		t.Fatalf("read buffered payload: %v", err)
+	}
+	if string(buffer) != payload {
+		t.Fatalf("unexpected payload: %q", string(buffer))
+	}
 }
 
 func mustProxyURL(t *testing.T, rawURL string) func(*http.Request) (*url.URL, error) {
@@ -1400,6 +1734,106 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
+}
+
+type failingResponseWriter struct {
+	header   http.Header
+	code     int
+	writeErr error
+}
+
+func (w *failingResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *failingResponseWriter) Write(data []byte) (int, error) {
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	return len(data), nil
+}
+
+func (w *failingResponseWriter) WriteHeader(statusCode int) {
+	w.code = statusCode
+}
+
+type hijackableResponseWriter struct {
+	header    http.Header
+	code      int
+	conn      net.Conn
+	buffered  *bufio.ReadWriter
+	hijackErr error
+}
+
+func (w *hijackableResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *hijackableResponseWriter) Write(data []byte) (int, error) {
+	return len(data), nil
+}
+
+func (w *hijackableResponseWriter) WriteHeader(statusCode int) {
+	w.code = statusCode
+}
+
+func (w *hijackableResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.hijackErr != nil {
+		return nil, nil, w.hijackErr
+	}
+	return w.conn, w.buffered, nil
+}
+
+type stubConn struct {
+	writeErr error
+	closed   bool
+	buffer   bytes.Buffer
+}
+
+func (c *stubConn) Read(p []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *stubConn) Write(p []byte) (int, error) {
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+	return c.buffer.Write(p)
+}
+
+func (c *stubConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (c *stubConn) LocalAddr() net.Addr {
+	return stubAddr("local")
+}
+
+func (c *stubConn) RemoteAddr() net.Addr {
+	return stubAddr("remote")
+}
+
+func (c *stubConn) SetDeadline(time.Time) error {
+	return nil
+}
+
+func (c *stubConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+func (c *stubConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+type stubAddr string
+
+func (a stubAddr) Network() string {
+	return "tcp"
+}
+
+func (a stubAddr) String() string {
+	return string(a)
 }
 
 type prefetchUpstream struct {

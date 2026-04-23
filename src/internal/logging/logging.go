@@ -10,6 +10,10 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+var openLogFile = func(path string, flag int, perm os.FileMode) (io.WriteCloser, error) {
+	return os.OpenFile(path, flag, perm)
+}
+
 // Options 定义日志初始化参数。
 //
 // 该结构描述日志级别、输出格式、目标文件与轮转策略，
@@ -91,7 +95,7 @@ func prepareLogFile(path string) error {
 		}
 	}
 
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := openLogFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("prepare log file %q: %w", path, err)
 	}

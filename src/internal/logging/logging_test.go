@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -128,6 +129,40 @@ func TestNewRejectsInvalidLogFilePath(t *testing.T) {
 	}
 }
 
+func TestPrepareLogFileRejectsDirectoryCreationFailure(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "occupied")
+	if err := os.WriteFile(parent, []byte("busy"), 0o644); err != nil {
+		t.Fatalf("write occupied file: %v", err)
+	}
+
+	err := prepareLogFile(filepath.Join(parent, "autoproxy.log"))
+	if err == nil {
+		t.Fatal("expected directory preparation error")
+	}
+	if want := "prepare log directory"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPrepareLogFileReturnsCloseError(t *testing.T) {
+	originalOpenLogFile := openLogFile
+	t.Cleanup(func() {
+		openLogFile = originalOpenLogFile
+	})
+
+	openLogFile = func(string, int, os.FileMode) (io.WriteCloser, error) {
+		return failingWriteCloser{}, nil
+	}
+
+	err := prepareLogFile("autoproxy.log")
+	if err == nil {
+		t.Fatal("expected close error")
+	}
+	if want := "close log file"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestParseLevel(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -151,4 +186,14 @@ func TestParseLevel(t *testing.T) {
 			}
 		})
 	}
+}
+
+type failingWriteCloser struct{}
+
+func (failingWriteCloser) Write([]byte) (int, error) {
+	return 0, nil
+}
+
+func (failingWriteCloser) Close() error {
+	return errors.New("close failed")
 }
