@@ -463,6 +463,27 @@ func TestEngineConcurrentReloadAndDecideSeesWholeSnapshot(t *testing.T) {
 	}
 }
 
+func TestAddAutoDetectHostRefreshesSnapshot(t *testing.T) {
+	engine := NewEngine()
+
+	if added := engine.AddAutoDetectHost("   "); added {
+		t.Fatal("expected empty host to be ignored")
+	}
+
+	if added := engine.AddAutoDetectHost(" Example.COM:443 "); !added {
+		t.Fatal("expected first add to refresh snapshot")
+	}
+
+	decision := engine.Decide("example.com")
+	if decision.Source != DecisionSourceAutoDetect {
+		t.Fatalf("expected auto-detect source, got %+v", decision)
+	}
+
+	if added := engine.AddAutoDetectHost("example.com"); added {
+		t.Fatal("expected duplicate add to keep snapshot unchanged")
+	}
+}
+
 type errReader struct {
 	err error
 }

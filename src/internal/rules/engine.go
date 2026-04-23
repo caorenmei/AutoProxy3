@@ -130,6 +130,33 @@ func (e *Engine) ReplaceAutoDetectRules(set HostRuleSet) {
 	e.autoDetect = cloneHostRuleSet(set)
 }
 
+// AddAutoDetectHost 将单个主机追加到自动探测规则快照。
+//
+// 参数 host 为待写入的目标主机名，可包含大小写差异或端口信息；函数会执行规范化，
+// 并在未存在时以原子方式刷新内存快照。返回 true 表示快照发生变更；返回 false 表示
+// 输入为空或主机已存在。
+func (e *Engine) AddAutoDetectHost(host string) bool {
+	normalized := normalizeDecisionHost(host)
+	if normalized == "" {
+		return false
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.autoDetect.exactHosts == nil {
+		e.autoDetect.exactHosts = make(map[string]struct{})
+	}
+	if _, ok := e.autoDetect.exactHosts[normalized]; ok {
+		return false
+	}
+
+	cloned := cloneHostRuleSet(e.autoDetect)
+	cloned.exactHosts[normalized] = struct{}{}
+	e.autoDetect = cloned
+	return true
+}
+
 // ReloadCustomSources 同时重载本地规则源与自动探测规则源。
 //
 // 参数 customReader 提供本地规则内容，参数 autoReader 提供自动探测规则内容。
