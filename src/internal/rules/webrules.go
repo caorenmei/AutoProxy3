@@ -12,8 +12,9 @@ import (
 // ParseWebRules 从在线规则源读取并解析 Base64 编码的 AutoProxy 规则文本。
 //
 // 参数 r 提供 HTTP 响应体中的 Base64 文本内容；函数会先完成 Base64 解码，
-// 再解析支持的 AutoProxy 规则行，包括头行、域名规则、直连排除规则与 URL 前缀规则。
-// 当读取输入、解码 Base64 或扫描文本失败时，函数会返回带上下文的错误。
+// 再解析当前支持的 AutoProxy 规则子集：头行、`||domain`、`@@||domain` 与
+// `|absolute-url-prefix`。不支持的语法以及非法或不完整的 `|...` URL 规则行会被忽略，
+// 不会导致整份规则加载失败。当读取输入、解码 Base64 失败时，函数会返回带上下文的错误。
 func ParseWebRules(r io.Reader) (WebRuleSet, error) {
 	body, err := io.ReadAll(r)
 	if err != nil {
@@ -25,8 +26,12 @@ func ParseWebRules(r io.Reader) (WebRuleSet, error) {
 		return WebRuleSet{}, fmt.Errorf("decode base64: %w", err)
 	}
 
+	return parseWebRuleText(strings.NewReader(string(decoded)))
+}
+
+func parseWebRuleText(r io.Reader) (WebRuleSet, error) {
 	var set WebRuleSet
-	scanner := bufio.NewScanner(strings.NewReader(string(decoded)))
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "[AutoProxy") {

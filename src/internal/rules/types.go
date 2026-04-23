@@ -35,7 +35,7 @@ func (s WebRuleSet) DirectHost(host string) bool {
 // ProxyURL 判断给定完整 URL 是否命中需要代理的 URL 前缀规则。
 //
 // 参数 rawURL 为待匹配的原始 URL 字符串；函数会对协议与主机名执行大小写归一化，
-// 然后按前缀规则匹配。返回 true 表示命中代理 URL 规则；返回 false 表示未命中。
+// 忽略 fragment，并按前缀规则匹配。返回 true 表示命中代理 URL 规则；返回 false 表示未命中。
 func (s WebRuleSet) ProxyURL(rawURL string) bool {
 	normalized := normalizeURLForMatch(rawURL)
 	for _, prefix := range s.proxyURLPrefixes {
@@ -49,7 +49,8 @@ func (s WebRuleSet) ProxyURL(rawURL string) bool {
 // HostRuleSet 表示从本地或自动探测规则文件解析得到的主机规则集合。
 //
 // 该类型仅按主机名进行匹配，不处理 URL 路径信息。
-// 规则同时支持精确主机名与包含 * 的通配模式，适用于本地规则和自动探测规则复用。
+// 规则同时支持精确主机名与包含 * 的通配模式，适用于本地规则和自动探测规则复用；
+// 其中 `*.example.com` 这类模式只匹配子域名，不匹配裸域 `example.com`。
 type HostRuleSet struct {
 	exactHosts       map[string]struct{}
 	wildcardPatterns []string
@@ -96,8 +97,8 @@ func normalizeHost(host string) string {
 func normalizeURLForMatch(rawURL string) string {
 	trimmed := strings.TrimSpace(rawURL)
 	parsed, err := url.Parse(trimmed)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return trimmed
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
+		return ""
 	}
 
 	var builder strings.Builder
@@ -108,10 +109,6 @@ func normalizeURLForMatch(rawURL string) string {
 	if parsed.RawQuery != "" {
 		builder.WriteString("?")
 		builder.WriteString(parsed.RawQuery)
-	}
-	if parsed.Fragment != "" {
-		builder.WriteString("#")
-		builder.WriteString(parsed.Fragment)
 	}
 	return builder.String()
 }
