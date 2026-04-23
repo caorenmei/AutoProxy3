@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"sync"
 
@@ -63,6 +64,7 @@ type Server struct {
 	dialContext         DialContext
 	upstreamDialContext DialContext
 	newRoundTripper     RoundTripperFactory
+	sharedRoundTripper  http.RoundTripper
 
 	attemptMu sync.Mutex
 	attempts  map[string]int
@@ -94,8 +96,10 @@ func NewServer(opts Options) *Server {
 	}
 
 	newRoundTripper := opts.NewRoundTripper
+	var sharedRoundTripper http.RoundTripper
 	if newRoundTripper == nil {
 		newRoundTripper = defaultRoundTripper
+		sharedRoundTripper = newRoundTripper(nil)
 	}
 
 	maxAttempts := opts.AutoDetectMaxAttempts
@@ -113,6 +117,7 @@ func NewServer(opts Options) *Server {
 		dialContext:         dialContext,
 		upstreamDialContext: upstreamDialContext,
 		newRoundTripper:     newRoundTripper,
+		sharedRoundTripper:  sharedRoundTripper,
 		attempts:            make(map[string]int),
 	}
 }
@@ -203,14 +208,15 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if fromAutoDetect {
+	errCh := make(chan tunnelCopyResult, 2)
+	go proxyTunnel(errCh, targetConn, clientConn)
+	go proxyTunnel(errCh, clientConn, targetConn)
+
+	resultA := <-errCh
+	resultB := <-errCh
+	if fromAutoDetect && tunnelForwardSucceeded(resultA, resultB) {
 		s.persistAutoDetectHost(r.Context(), targetHost)
 	}
-
-	errCh := make(chan error, 2)
-	go proxyCopy(errCh, targetConn, clientConn)
-	go proxyCopy(errCh, clientConn, targetConn)
-	<-errCh
 }
 
 func (s *Server) forwardHTTPRequest(r *http.Request, targetHost, targetAddr string, decision rules.Decision, useUpstream bool) (*http.Response, bool, error) {
@@ -248,7 +254,7 @@ func (s *Server) openTunnel(ctx context.Context, targetHost, targetAddr string, 
 		return conn, false, nil
 	}
 
-	if !s.shouldAutoDetect(decision, targetHost, useUpstream) {
+	if !s.shouldAutoDetect(decision, targetHost, useUpstream) || !isTCPDialFailure(err) {
 		return nil, false, err
 	}
 
@@ -272,6 +278,10 @@ func (s *Server) roundTrip(r *http.Request, targetAddr string, useUpstream bool)
 	}
 
 	request := cloneRequest(r)
+	request = request.WithContext(withRequestDial(request.Context(), dial))
+	if s.sharedRoundTripper != nil {
+		return s.sharedRoundTripper.RoundTrip(request)
+	}
 	return s.newRoundTripper(dial).RoundTrip(request)
 }
 
@@ -297,7 +307,8 @@ func (s *Server) connectViaUpstream(ctx context.Context, targetAddr string) (net
 		return nil, err
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -308,7 +319,7 @@ func (s *Server) connectViaUpstream(ctx context.Context, targetAddr string) (net
 		return nil, fmt.Errorf("upstream CONNECT failed: %s", resp.Status)
 	}
 	_ = resp.Body.Close()
-	return conn, nil
+	return newBufferedConn(conn, reader), nil
 }
 
 func (s *Server) resolveProxyUsage(decision rules.Decision, targetHost string) bool {
@@ -363,7 +374,7 @@ func (s *Server) resetAttempts(host string) {
 func defaultRoundTripper(dial DialContext) http.RoundTripper {
 	return &http.Transport{
 		Proxy:               nil,
-		DialContext:         dial,
+		DialContext:         resolveDialContext(dial),
 		ForceAttemptHTTP2:   false,
 		DisableCompression:  true,
 		MaxIdleConnsPerHost: 1,
@@ -375,7 +386,7 @@ func cloneRequest(r *http.Request) *http.Request {
 	cloned.RequestURI = ""
 	cloned.Host = r.Host
 	cloned.Header = r.Header.Clone()
-	cloned.Header.Del("Proxy-Connection")
+	stripProxyRequestHeaders(cloned.Header)
 	return cloned
 }
 
@@ -464,4 +475,139 @@ func copyHeader(dst, src http.Header) {
 func proxyCopy(errCh chan<- error, dst io.Writer, src io.Reader) {
 	_, err := io.Copy(dst, src)
 	errCh <- err
+}
+
+type requestDialKey struct{}
+
+type bufferedConn struct {
+	net.Conn
+	reader io.Reader
+}
+
+func newBufferedConn(conn net.Conn, reader io.Reader) net.Conn {
+	return &bufferedConn{
+		Conn:   conn,
+		reader: reader,
+	}
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
+}
+
+func (c *bufferedConn) CloseRead() error {
+	closer, ok := c.Conn.(interface{ CloseRead() error })
+	if !ok {
+		return nil
+	}
+	return closer.CloseRead()
+}
+
+func (c *bufferedConn) CloseWrite() error {
+	closer, ok := c.Conn.(interface{ CloseWrite() error })
+	if !ok {
+		return nil
+	}
+	return closer.CloseWrite()
+}
+
+type tunnelCopyResult struct {
+	bytes int64
+	err   error
+}
+
+func proxyTunnel(errCh chan<- tunnelCopyResult, dst io.Writer, src io.Reader) {
+	written, err := io.Copy(dst, src)
+	closeWriter(dst)
+	closeReader(src)
+	errCh <- tunnelCopyResult{
+		bytes: written,
+		err:   err,
+	}
+}
+
+func tunnelForwardSucceeded(results ...tunnelCopyResult) bool {
+	if len(results) == 0 {
+		return false
+	}
+
+	for _, result := range results {
+		if result.err != nil {
+			return false
+		}
+		if result.bytes == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func withRequestDial(ctx context.Context, dial DialContext) context.Context {
+	return context.WithValue(ctx, requestDialKey{}, dial)
+}
+
+func resolveDialContext(fallback DialContext) DialContext {
+	if fallback != nil {
+		return fallback
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dial, _ := ctx.Value(requestDialKey{}).(DialContext)
+		if dial == nil {
+			return nil, errors.New("missing request dial context")
+		}
+		return dial(ctx, network, addr)
+	}
+}
+
+func stripProxyRequestHeaders(header http.Header) {
+	tokens := connectionTokens(header.Values("Connection"))
+
+	header.Del("Proxy-Authorization")
+	header.Del("Proxy-Connection")
+
+	for _, key := range []string{
+		"Connection",
+		"Keep-Alive",
+		"Proxy-Authenticate",
+		"Te",
+		"Trailer",
+		"Transfer-Encoding",
+		"Upgrade",
+	} {
+		header.Del(key)
+	}
+
+	for _, token := range tokens {
+		header.Del(token)
+	}
+}
+
+func connectionTokens(values []string) []string {
+	tokens := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			trimmed := textproto.TrimString(token)
+			if trimmed == "" {
+				continue
+			}
+			tokens = append(tokens, textproto.CanonicalMIMEHeaderKey(trimmed))
+		}
+	}
+	return tokens
+}
+
+func closeWriter(target any) {
+	closer, ok := target.(interface{ CloseWrite() error })
+	if !ok {
+		return
+	}
+	_ = closer.CloseWrite()
+}
+
+func closeReader(target any) {
+	closer, ok := target.(interface{ CloseRead() error })
+	if !ok {
+		return
+	}
+	_ = closer.CloseRead()
 }

@@ -155,6 +155,45 @@ func TestServerCONNECTViaUpstreamConnectSuccess(t *testing.T) {
 	}
 }
 
+func TestServerCONNECTViaUpstreamPreservesBufferedTunnelBytes(t *testing.T) {
+	targetAddr, closeTarget := startGreetingServer(t, "hello")
+	defer closeTarget()
+
+	upstream := newPrefetchUpstream(t, map[string]string{targetAddr: targetAddr})
+	defer upstream.Close()
+
+	host, _, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+
+	engine := rules.NewEngine()
+	engine.ReplaceCustomRules(newHostRuleSet(t, host))
+
+	server := NewServer(Options{
+		Engine:        engine,
+		Logger:        newTestLogger(io.Discard),
+		UpstreamProxy: upstream.Address(),
+	})
+	proxyServer := httptest.NewServer(server)
+	defer proxyServer.Close()
+
+	conn := mustOpenTunnel(t, proxyServer.URL, targetAddr)
+	defer conn.Close()
+
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	buffer := make([]byte, 5)
+	if _, err := io.ReadFull(conn, buffer); err != nil {
+		t.Fatalf("read greeting payload: %v", err)
+	}
+	if string(buffer) != "hello" {
+		t.Fatalf("unexpected greeting payload: %q", string(buffer))
+	}
+}
+
 func TestServerRuleRequiresUpstreamWithoutConfigFallsBackToDirectAndWarns(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "fallback-direct-ok")
@@ -355,6 +394,147 @@ func TestServerAutoDetectTriggersOnDirectTCPDialFailureInHTTPPath(t *testing.T) 
 	}
 }
 
+func TestServerAutoDetectDoesNotTriggerOnNonTCPDialFailureInCONNECTPath(t *testing.T) {
+	targetAddr, closeTarget := startEchoServer(t)
+	defer closeTarget()
+
+	recorder := &memoryRecorder{}
+	upstream := newFakeUpstream(t, map[string]string{targetAddr: targetAddr})
+	defer upstream.Close()
+
+	blockedHost, _, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+
+	server := NewServer(Options{
+		Engine:                rules.NewEngine(),
+		Logger:                newTestLogger(io.Discard),
+		UpstreamProxy:         upstream.Address(),
+		AutoDetectEnabled:     true,
+		AutoDetectMaxAttempts: 1,
+		AutoDetectRecorder:    recorder,
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, fmt.Errorf("non-tcp-failure-%s", blockedHost)
+		},
+	})
+	proxyServer := httptest.NewServer(server)
+	defer proxyServer.Close()
+
+	resp, conn := mustOpenTunnelResponse(t, proxyServer.URL, targetAddr)
+	defer conn.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected CONNECT 502, got %d", resp.StatusCode)
+	}
+	if recorder.Count() != 0 {
+		t.Fatalf("expected no auto-detect record, got %d", recorder.Count())
+	}
+	if got := upstream.ConnectCount(targetAddr); got != 0 {
+		t.Fatalf("expected no upstream CONNECT, got %d", got)
+	}
+}
+
+func TestServerCONNECTAutoDetectRecordsHostAfterSuccessfulForwarding(t *testing.T) {
+	targetAddr, closeTarget := startEchoServer(t)
+	defer closeTarget()
+
+	recorder := &memoryRecorder{}
+	upstream := newFakeUpstream(t, map[string]string{targetAddr: targetAddr})
+	defer upstream.Close()
+
+	blockedHost, _, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+
+	server := NewServer(Options{
+		Engine:                rules.NewEngine(),
+		Logger:                newTestLogger(io.Discard),
+		UpstreamProxy:         upstream.Address(),
+		AutoDetectEnabled:     true,
+		AutoDetectMaxAttempts: 1,
+		AutoDetectRecorder:    recorder,
+		DialContext:           failingDialerForHost(t, blockedHost),
+	})
+	proxyServer := httptest.NewServer(server)
+	defer proxyServer.Close()
+
+	conn := mustOpenTunnel(t, proxyServer.URL, targetAddr)
+	if recorder.Count() != 0 {
+		t.Fatalf("expected no record before forwarding completes, got %d", recorder.Count())
+	}
+
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("write tunnel payload: %v", err)
+	}
+	buffer := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buffer); err != nil {
+		t.Fatalf("read tunnel payload: %v", err)
+	}
+	if string(buffer) != "ping" {
+		t.Fatalf("unexpected tunnel echo: %q", string(buffer))
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close tunnel: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if recorder.Count() == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if recorder.Count() != 1 || recorder.LastHost() != blockedHost {
+		t.Fatalf("unexpected recorder state after forwarding: count=%d host=%q", recorder.Count(), recorder.LastHost())
+	}
+}
+
+func TestServerCONNECTAutoDetectDoesNotRecordHostWhenForwardingFails(t *testing.T) {
+	targetAddr, closeTarget := startReadThenCloseServer(t)
+	defer closeTarget()
+
+	recorder := &memoryRecorder{}
+	upstream := newFakeUpstream(t, map[string]string{targetAddr: targetAddr})
+	defer upstream.Close()
+
+	blockedHost, _, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+
+	server := NewServer(Options{
+		Engine:                rules.NewEngine(),
+		Logger:                newTestLogger(io.Discard),
+		UpstreamProxy:         upstream.Address(),
+		AutoDetectEnabled:     true,
+		AutoDetectMaxAttempts: 1,
+		AutoDetectRecorder:    recorder,
+		DialContext:           failingDialerForHost(t, blockedHost),
+	})
+	proxyServer := httptest.NewServer(server)
+	defer proxyServer.Close()
+
+	conn := mustOpenTunnel(t, proxyServer.URL, targetAddr)
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("write tunnel payload: %v", err)
+	}
+	buffer := make([]byte, 4)
+	if _, err := conn.Read(buffer); err == nil {
+		t.Fatal("expected forwarding read failure")
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if recorder.Count() != 0 {
+			t.Fatalf("expected no record when forwarding fails, got %d", recorder.Count())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestServerAutoDetectStoreFailureLogsErrorAndDoesNotRefreshRule(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "store-failure-ok")
@@ -444,6 +624,100 @@ func TestServerEndToEndWithFakeUpstream(t *testing.T) {
 	}
 	if got := upstream.ConnectCount(targetURL.Host); got != 1 {
 		t.Fatalf("expected upstream CONNECT count 1, got %d", got)
+	}
+}
+
+func TestServerHTTPForwardingStripsProxySensitiveHeaders(t *testing.T) {
+	headerCh := make(chan http.Header, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headerCh <- r.Header.Clone()
+		fmt.Fprint(w, "header-ok")
+	}))
+	defer target.Close()
+
+	server := NewServer(Options{
+		Engine: rules.NewEngine(),
+		Logger: newTestLogger(io.Discard),
+	})
+	proxyServer := httptest.NewServer(server)
+	defer proxyServer.Close()
+
+	proxyURL, err := url.Parse(proxyServer.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   5 * time.Second,
+	}
+
+	req, err := http.NewRequest(http.MethodGet, target.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Proxy-Authorization", "Basic Zm9vOmJhcg==")
+	req.Header.Set("Proxy-Connection", "keep-alive")
+	req.Header.Set("Connection", "Keep-Alive, X-Hop-Test")
+	req.Header.Set("Keep-Alive", "timeout=5")
+	req.Header.Set("X-Hop-Test", "drop-me")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	headers := <-headerCh
+	if got := headers.Get("Proxy-Authorization"); got != "" {
+		t.Fatalf("expected Proxy-Authorization to be stripped, got %q", got)
+	}
+	if got := headers.Get("Proxy-Connection"); got != "" {
+		t.Fatalf("expected Proxy-Connection to be stripped, got %q", got)
+	}
+	if got := headers.Get("Keep-Alive"); got != "" {
+		t.Fatalf("expected Keep-Alive to be stripped, got %q", got)
+	}
+	if got := headers.Get("X-Hop-Test"); got != "" {
+		t.Fatalf("expected Connection token header to be stripped, got %q", got)
+	}
+}
+
+func TestServerHTTPDefaultTransportReusesUpstreamTunnel(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "shared-transport-ok")
+	}))
+	defer target.Close()
+
+	targetURL, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatalf("parse target URL: %v", err)
+	}
+
+	upstream := newFakeUpstream(t, map[string]string{targetURL.Host: targetURL.Host})
+	defer upstream.Close()
+
+	engine := rules.NewEngine()
+	engine.ReplaceCustomRules(newHostRuleSet(t, targetURL.Hostname()))
+
+	server := NewServer(Options{
+		Engine:        engine,
+		Logger:        newTestLogger(io.Discard),
+		UpstreamProxy: upstream.Address(),
+	})
+	proxyServer := httptest.NewServer(server)
+	defer proxyServer.Close()
+
+	resp1, body1 := mustDoProxyRequest(t, proxyServer.URL, target.URL+"/first")
+	defer resp1.Body.Close()
+	resp2, body2 := mustDoProxyRequest(t, proxyServer.URL, target.URL+"/second")
+	defer resp2.Body.Close()
+
+	if body1 != "shared-transport-ok" || body2 != "shared-transport-ok" {
+		t.Fatalf("unexpected bodies: %q %q", body1, body2)
+	}
+	if got := upstream.ConnectCount(targetURL.Host); got != 1 {
+		t.Fatalf("expected shared transport to reuse upstream tunnel, got %d CONNECT calls", got)
 	}
 }
 
@@ -624,6 +898,92 @@ func startEchoServer(t *testing.T) (string, func()) {
 	}
 }
 
+func startGreetingServer(t *testing.T, greeting string) (string, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen greeting server: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.WriteString(c, greeting)
+				_, _ = io.Copy(io.Discard, c)
+			}(conn)
+		}
+	}()
+
+	return listener.Addr().String(), func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
+func startClosingServer(t *testing.T) (string, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen closing server: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	return listener.Addr().String(), func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
+func startReadThenCloseServer(t *testing.T) (string, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen read-then-close server: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buffer := make([]byte, 32)
+				_, _ = c.Read(buffer)
+			}(conn)
+		}
+	}()
+
+	return listener.Addr().String(), func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
 func newHostRuleSet(t *testing.T, host string) rules.HostRuleSet {
 	t.Helper()
 	set, err := rules.ParseHostRules(strings.NewReader(host + "\n"))
@@ -677,6 +1037,29 @@ func mustOpenTunnel(t *testing.T, proxyAddress string, targetAddr string) net.Co
 	return conn
 }
 
+func mustOpenTunnelResponse(t *testing.T, proxyAddress string, targetAddr string) (*http.Response, net.Conn) {
+	t.Helper()
+
+	proxyURL, err := url.Parse(proxyAddress)
+	if err != nil {
+		t.Fatalf("parse proxy address: %v", err)
+	}
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetAddr, targetAddr); err != nil {
+		t.Fatalf("write CONNECT request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	return resp, conn
+}
+
 func mustProxyURL(t *testing.T, rawURL string) func(*http.Request) (*url.URL, error) {
 	t.Helper()
 	parsed, err := url.Parse(rawURL)
@@ -710,4 +1093,87 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
+}
+
+type prefetchUpstream struct {
+	t        *testing.T
+	listener net.Listener
+	routes   map[string]string
+	closed   atomic.Bool
+}
+
+func newPrefetchUpstream(t *testing.T, routes map[string]string) *prefetchUpstream {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen prefetch upstream: %v", err)
+	}
+
+	u := &prefetchUpstream{
+		t:        t,
+		listener: listener,
+		routes:   routes,
+	}
+	go u.serve()
+	return u
+}
+
+func (u *prefetchUpstream) Address() string {
+	return u.listener.Addr().String()
+}
+
+func (u *prefetchUpstream) Close() {
+	if u.closed.CompareAndSwap(false, true) {
+		_ = u.listener.Close()
+	}
+}
+
+func (u *prefetchUpstream) serve() {
+	for {
+		conn, err := u.listener.Accept()
+		if err != nil {
+			if u.closed.Load() {
+				return
+			}
+			return
+		}
+		go u.handleConn(conn)
+	}
+}
+
+func (u *prefetchUpstream) handleConn(clientConn net.Conn) {
+	defer clientConn.Close()
+
+	reader := bufio.NewReader(clientConn)
+	req, err := http.ReadRequest(reader)
+	if err != nil {
+		u.t.Errorf("read upstream request: %v", err)
+		return
+	}
+	if req.Method != http.MethodConnect {
+		u.t.Errorf("unexpected upstream method: %s", req.Method)
+		return
+	}
+
+	targetAddr := req.Host
+	actualAddr := u.routes[targetAddr]
+	if actualAddr == "" {
+		fmt.Fprintf(clientConn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+		return
+	}
+
+	targetConn, err := net.Dial("tcp", actualAddr)
+	if err != nil {
+		fmt.Fprintf(clientConn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+		return
+	}
+	defer targetConn.Close()
+
+	if _, err := io.Copy(clientConn, io.MultiReader(
+		strings.NewReader("HTTP/1.1 200 Connection Established\r\n\r\n"),
+		targetConn,
+	)); err != nil && !errors.Is(err, net.ErrClosed) {
+		return
+	}
 }
