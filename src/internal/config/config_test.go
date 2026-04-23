@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/caorenmei/autoproxy3/src/internal/logging"
 )
 
 func TestLoadConfigAppliesDefaults(t *testing.T) {
@@ -324,5 +326,28 @@ func stubAbsPath(stub func(string) (string, error)) func() {
 	absPath = stub
 	return func() {
 		absPath = original
+	}
+}
+
+func TestLoggingConfigToOptions(t *testing.T) {
+	cfg := LoggingConfig{
+		Level:      "debug",
+		Format:     "json",
+		FilePath:   "/var/log/autoproxy3.log",
+		MaxSize:    20,
+		MaxBackups: 8,
+	}
+
+	got := cfg.ToOptions()
+	want := logging.Options{
+		Level:      "debug",
+		Format:     "json",
+		FilePath:   "/var/log/autoproxy3.log",
+		MaxSize:    20,
+		MaxBackups: 8,
+	}
+
+	if got != want {
+		t.Fatalf("unexpected logging options: got %+v want %+v", got, want)
 	}
 }

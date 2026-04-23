@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+
+	"github.com/caorenmei/autoproxy3/src/internal/logging"
 )
 
 var absPath = filepath.Abs
@@ -98,6 +100,21 @@ type LoggingConfig struct {
 	MaxSize int `json:"max_size"`
 	// MaxBackups 表示日志文件最大保留数量。
 	MaxBackups int `json:"max_backups"`
+}
+
+// ToOptions 将日志配置转换为日志初始化层使用的 Options。
+//
+// 返回值完整保留当前配置中的级别、格式、文件路径与轮转参数，
+// 以避免调用方在主流程中重复执行字段映射。
+// 该方法本身不执行合法性校验，校验由 logging.New 负责。
+func (c LoggingConfig) ToOptions() logging.Options {
+	return logging.Options{
+		Level:      c.Level,
+		Format:     c.Format,
+		FilePath:   c.FilePath,
+		MaxSize:    c.MaxSize,
+		MaxBackups: c.MaxBackups,
+	}
 }
 
 type rawConfig struct {
