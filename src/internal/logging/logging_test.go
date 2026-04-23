@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -60,7 +61,10 @@ func TestNewRejectsInvalidFormat(t *testing.T) {
 }
 
 func TestNewWriterUsesStdoutWhenFilePathEmpty(t *testing.T) {
-	writer := newWriter(Options{})
+	writer, err := newWriter(Options{})
+	if err != nil {
+		t.Fatalf("new writer: %v", err)
+	}
 	if writer != os.Stdout {
 		t.Fatalf("expected stdout writer, got %T", writer)
 	}
@@ -68,7 +72,10 @@ func TestNewWriterUsesStdoutWhenFilePathEmpty(t *testing.T) {
 
 func TestNewWriterUsesLumberjackWhenFilePathSet(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "autoproxy.log")
-	writer := newWriter(Options{FilePath: path, MaxSize: 12, MaxBackups: 7})
+	writer, err := newWriter(Options{FilePath: path, MaxSize: 12, MaxBackups: 7})
+	if err != nil {
+		t.Fatalf("new writer: %v", err)
+	}
 
 	if got := fmt.Sprintf("%T", writer); got != "*lumberjack.Logger" {
 		t.Fatalf("expected lumberjack logger, got %s", got)
@@ -84,6 +91,40 @@ func TestNewWriterUsesLumberjackWhenFilePathSet(t *testing.T) {
 	}
 	if len(content) == 0 {
 		t.Fatal("expected log file content")
+	}
+}
+
+func TestNewCreatesMissingParentDirectoryForLogFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs", "nested", "autoproxy.log")
+
+	logger, err := New(Options{Level: "info", Format: "text", FilePath: path, MaxSize: 12, MaxBackups: 7})
+	if err != nil {
+		t.Fatalf("new logger: %v", err)
+	}
+
+	logger.Info("create parent directory")
+
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Fatalf("stat parent directory: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if len(content) == 0 {
+		t.Fatal("expected log file content")
+	}
+}
+
+func TestNewRejectsInvalidLogFilePath(t *testing.T) {
+	path := t.TempDir()
+
+	_, err := New(Options{Level: "info", Format: "text", FilePath: path, MaxSize: 12, MaxBackups: 7})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if want := "prepare log file"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

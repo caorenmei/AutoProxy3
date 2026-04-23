@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -31,14 +32,19 @@ type Options struct {
 //
 // 参数 opts 指定日志级别、输出格式以及可选的文件轮转配置。
 // 当 opts.FilePath 为空时日志输出到标准输出；否则输出到启用 lumberjack 轮转的文件。
-// 当级别或格式不受支持时，函数返回对应错误。
+// 当级别、格式或日志文件初始化失败时，函数返回对应错误。
 func New(opts Options) (*slog.Logger, error) {
 	level, err := parseLevel(opts.Level)
 	if err != nil {
 		return nil, err
 	}
 
-	handler, err := newHandler(opts.Format, newWriter(opts), level)
+	writer, err := newWriter(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	handler, err := newHandler(opts.Format, writer, level)
 	if err != nil {
 		return nil, err
 	}
@@ -61,16 +67,40 @@ func parseLevel(level string) (slog.Level, error) {
 	}
 }
 
-func newWriter(opts Options) io.Writer {
+func newWriter(opts Options) (io.Writer, error) {
 	if opts.FilePath == "" {
-		return os.Stdout
+		return os.Stdout, nil
+	}
+
+	if err := prepareLogFile(opts.FilePath); err != nil {
+		return nil, err
 	}
 
 	return &lumberjack.Logger{
 		Filename:   opts.FilePath,
 		MaxSize:    opts.MaxSize,
 		MaxBackups: opts.MaxBackups,
+	}, nil
+}
+
+func prepareLogFile(path string) error {
+	dir := filepath.Dir(path)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("prepare log directory %q: %w", dir, err)
+		}
 	}
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("prepare log file %q: %w", path, err)
+	}
+
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close log file %q: %w", path, err)
+	}
+
+	return nil
 }
 
 func newHandler(format string, writer io.Writer, level slog.Level) (slog.Handler, error) {
