@@ -12,14 +12,40 @@ import (
 // Decision 表示规则引擎对单个目标的统一判路结果。
 //
 // UseProxy 表示是否应走上游代理；Source 表示命中的规则来源，
-// 可能值为 `web`、`custom`、`auto-detect` 或 `default`；
-// Reason 表示更细粒度的命中原因，便于后续日志与代理层复用。
+// 调用方应优先使用 DecisionSource* 常量比较；
+// Reason 表示更细粒度的命中原因，调用方应优先使用 DecisionReason* 常量比较。
 // 当 UseProxy 为 false 时，调用方应执行直连或后续默认直连流程。
 type Decision struct {
 	UseProxy bool
 	Source   string
 	Reason   string
 }
+
+const (
+	// DecisionSourceWeb 表示命中在线规则快照。
+	DecisionSourceWeb = "web"
+	// DecisionSourceCustom 表示命中本地规则快照。
+	DecisionSourceCustom = "custom"
+	// DecisionSourceAutoDetect 表示命中自动探测规则快照。
+	DecisionSourceAutoDetect = "auto-detect"
+	// DecisionSourceDefault 表示未命中任何规则，走默认直连。
+	DecisionSourceDefault = "default"
+)
+
+const (
+	// DecisionReasonWebDirect 表示命中在线直连主机规则。
+	DecisionReasonWebDirect = "web-direct"
+	// DecisionReasonWebProxyURL 表示命中在线 URL 前缀代理规则。
+	DecisionReasonWebProxyURL = "web-proxy-url"
+	// DecisionReasonWebProxyHost 表示命中在线主机代理规则。
+	DecisionReasonWebProxyHost = "web-proxy-host"
+	// DecisionReasonCustomProxyHost 表示命中本地主机代理规则。
+	DecisionReasonCustomProxyHost = "custom-proxy-host"
+	// DecisionReasonAutoDetectProxyHost 表示命中自动探测主机代理规则。
+	DecisionReasonAutoDetectProxyHost = "auto-detect-proxy-host"
+	// DecisionReasonDirectDefault 表示未命中任何规则后的默认直连。
+	DecisionReasonDirectDefault = "direct-default"
+)
 
 // Engine 表示统一规则引擎。
 //
@@ -83,7 +109,7 @@ func (e *Engine) DecideURL(rawURL string) Decision {
 func (e *Engine) ReplaceWebRules(set WebRuleSet) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.web = set.clone()
+	e.web = cloneWebRuleSet(set)
 }
 
 // ReplaceCustomRules 原子替换本地规则快照。
@@ -92,7 +118,7 @@ func (e *Engine) ReplaceWebRules(set WebRuleSet) {
 func (e *Engine) ReplaceCustomRules(set HostRuleSet) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.custom = set.clone()
+	e.custom = cloneHostRuleSet(set)
 }
 
 // ReplaceAutoDetectRules 原子替换自动探测规则快照。
@@ -101,7 +127,7 @@ func (e *Engine) ReplaceCustomRules(set HostRuleSet) {
 func (e *Engine) ReplaceAutoDetectRules(set HostRuleSet) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.autoDetect = set.clone()
+	e.autoDetect = cloneHostRuleSet(set)
 }
 
 // ReloadCustomSources 同时重载本地规则源与自动探测规则源。
@@ -122,8 +148,8 @@ func (e *Engine) ReloadCustomSources(customReader io.Reader, autoReader io.Reade
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.custom = customSet.clone()
-	e.autoDetect = autoDetectSet.clone()
+	e.custom = cloneHostRuleSet(customSet)
+	e.autoDetect = cloneHostRuleSet(autoDetectSet)
 	return nil
 }
 
@@ -139,38 +165,38 @@ func (e *Engine) snapshot() engineSnapshot {
 
 func (s engineSnapshot) decideHost(host string) Decision {
 	if s.web.DirectHost(host) {
-		return Decision{Source: "web", Reason: "web-direct"}
+		return Decision{Source: DecisionSourceWeb, Reason: DecisionReasonWebDirect}
 	}
 	if s.web.ProxyHost(host) {
-		return Decision{UseProxy: true, Source: "web", Reason: "web-proxy-host"}
+		return Decision{UseProxy: true, Source: DecisionSourceWeb, Reason: DecisionReasonWebProxyHost}
 	}
 	if s.custom.Match(host) {
-		return Decision{UseProxy: true, Source: "custom", Reason: "custom-proxy-host"}
+		return Decision{UseProxy: true, Source: DecisionSourceCustom, Reason: DecisionReasonCustomProxyHost}
 	}
 	if s.autoDetect.Match(host) {
-		return Decision{UseProxy: true, Source: "auto-detect", Reason: "auto-detect-proxy-host"}
+		return Decision{UseProxy: true, Source: DecisionSourceAutoDetect, Reason: DecisionReasonAutoDetectProxyHost}
 	}
-	return Decision{Source: "default", Reason: "direct-default"}
+	return Decision{Source: DecisionSourceDefault, Reason: DecisionReasonDirectDefault}
 }
 
 func (s engineSnapshot) decideURL(rawURL string) Decision {
 	host := hostFromURL(rawURL)
 	if s.web.DirectHost(host) {
-		return Decision{Source: "web", Reason: "web-direct"}
+		return Decision{Source: DecisionSourceWeb, Reason: DecisionReasonWebDirect}
 	}
 	if s.web.ProxyURL(rawURL) {
-		return Decision{UseProxy: true, Source: "web", Reason: "web-proxy-url"}
+		return Decision{UseProxy: true, Source: DecisionSourceWeb, Reason: DecisionReasonWebProxyURL}
 	}
 	if s.web.ProxyHost(host) {
-		return Decision{UseProxy: true, Source: "web", Reason: "web-proxy-host"}
+		return Decision{UseProxy: true, Source: DecisionSourceWeb, Reason: DecisionReasonWebProxyHost}
 	}
 	if s.custom.Match(host) {
-		return Decision{UseProxy: true, Source: "custom", Reason: "custom-proxy-host"}
+		return Decision{UseProxy: true, Source: DecisionSourceCustom, Reason: DecisionReasonCustomProxyHost}
 	}
 	if s.autoDetect.Match(host) {
-		return Decision{UseProxy: true, Source: "auto-detect", Reason: "auto-detect-proxy-host"}
+		return Decision{UseProxy: true, Source: DecisionSourceAutoDetect, Reason: DecisionReasonAutoDetectProxyHost}
 	}
-	return Decision{Source: "default", Reason: "direct-default"}
+	return Decision{Source: DecisionSourceDefault, Reason: DecisionReasonDirectDefault}
 }
 
 func normalizeDecisionHost(host string) string {

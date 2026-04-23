@@ -112,22 +112,3 @@ func normalizeURLForMatch(rawURL string) string {
 	}
 	return builder.String()
 }
-
-func (s WebRuleSet) clone() WebRuleSet {
-	return WebRuleSet{
-		proxyDomains:     append([]string(nil), s.proxyDomains...),
-		directDomains:    append([]string(nil), s.directDomains...),
-		proxyURLPrefixes: append([]string(nil), s.proxyURLPrefixes...),
-	}
-}
-
-func (s HostRuleSet) clone() HostRuleSet {
-	cloned := HostRuleSet{
-		exactHosts:       make(map[string]struct{}, len(s.exactHosts)),
-		wildcardPatterns: append([]string(nil), s.wildcardPatterns...),
-	}
-	for host := range s.exactHosts {
-		cloned.exactHosts[host] = struct{}{}
-	}
-	return cloned
-}
