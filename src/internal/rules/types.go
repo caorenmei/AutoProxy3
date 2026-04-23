@@ -56,10 +56,10 @@ type HostRuleSet struct {
 	wildcardPatterns []string
 }
 
-// Match 判断给定主机名是否命中本地主机规则。
+// Match 判断给定主机名是否命中主机规则集合。
 //
 // 参数 host 为待匹配的主机名，函数会执行大小写归一化，并依次检查精确主机规则和通配模式规则。
-// 返回 true 表示命中任一规则；返回 false 表示未命中。
+// 该方法同时适用于本地规则与自动探测规则。返回 true 表示命中任一规则；返回 false 表示未命中。
 func (s HostRuleSet) Match(host string) bool {
 	normalized := normalizeHost(host)
 	if normalized == "" {
@@ -111,4 +111,23 @@ func normalizeURLForMatch(rawURL string) string {
 		builder.WriteString(parsed.RawQuery)
 	}
 	return builder.String()
+}
+
+func (s WebRuleSet) clone() WebRuleSet {
+	return WebRuleSet{
+		proxyDomains:     append([]string(nil), s.proxyDomains...),
+		directDomains:    append([]string(nil), s.directDomains...),
+		proxyURLPrefixes: append([]string(nil), s.proxyURLPrefixes...),
+	}
+}
+
+func (s HostRuleSet) clone() HostRuleSet {
+	cloned := HostRuleSet{
+		exactHosts:       make(map[string]struct{}, len(s.exactHosts)),
+		wildcardPatterns: append([]string(nil), s.wildcardPatterns...),
+	}
+	for host := range s.exactHosts {
+		cloned.exactHosts[host] = struct{}{}
+	}
+	return cloned
 }
