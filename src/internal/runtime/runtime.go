@@ -33,7 +33,7 @@ type Runtime struct {
 	config config.Config
 
 	engine          *rules.Engine
-	webSource       *rulesources.WebSource
+	webSource       rulesources.WebSource
 	fileSource      rulesources.FileSource
 	autoDetectStore rulesources.AutoDetectStore
 
@@ -58,7 +58,7 @@ func New(cfg config.Config) (Runner, error) {
 		autoDetectStore: rulesources.AutoDetectStore{Path: cfg.AutoDetect.RulesPath},
 	}
 	if cfg.WebRules.Enabled {
-		rt.webSource = &rulesources.WebSource{
+		rt.webSource = rulesources.WebSource{
 			URL:       cfg.WebRules.URL,
 			CachePath: cfg.WebRules.CachePath,
 		}
@@ -102,7 +102,7 @@ func (r *Runtime) ReloadWebRules(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if r.webSource == nil {
+	if !r.config.WebRules.Enabled {
 		return errWebRulesNotConfigured
 	}
 

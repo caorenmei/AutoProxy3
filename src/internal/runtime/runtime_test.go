@@ -63,9 +63,6 @@ func TestNewPreparesRuleSourceDependencies(t *testing.T) {
 	if store.Path != cfg.AutoDetect.RulesPath {
 		t.Fatalf("unexpected auto-detect rules path: got %q want %q", store.Path, cfg.AutoDetect.RulesPath)
 	}
-	if concrete.webSource == nil {
-		t.Fatal("expected web source")
-	}
 	if concrete.webSource.URL != cfg.WebRules.URL {
 		t.Fatalf("unexpected web source url: got %q want %q", concrete.webSource.URL, cfg.WebRules.URL)
 	}
@@ -90,7 +87,7 @@ func TestRuntimeFieldTypesMatchPlannedSources(t *testing.T) {
 		field string
 		want  reflect.Type
 	}{
-		{field: "webSource", want: reflect.TypeOf((*rulesources.WebSource)(nil))},
+		{field: "webSource", want: reflect.TypeOf(rulesources.WebSource{})},
 		{field: "fileSource", want: reflect.TypeOf(rulesources.FileSource{})},
 		{field: "autoDetectStore", want: reflect.TypeOf(rulesources.AutoDetectStore{})},
 	}
@@ -129,8 +126,14 @@ func TestNewSkipsWebSourceWhenWebRulesDisabled(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected concrete runner, got %T", runnerValue)
 	}
-	if concrete.webSource != nil {
-		t.Fatalf("expected no web source, got %#v", concrete.webSource)
+	if concrete.webSource.URL != "" {
+		t.Fatalf("expected zero-value web source url, got %q", concrete.webSource.URL)
+	}
+	if concrete.webSource.CachePath != "" {
+		t.Fatalf("expected zero-value web source cache path, got %q", concrete.webSource.CachePath)
+	}
+	if concrete.webSource.HTTPClient != nil {
+		t.Fatalf("expected zero-value web source client, got %#v", concrete.webSource.HTTPClient)
 	}
 }
 
@@ -254,8 +257,9 @@ func TestRuntimeReloadWebRulesReplacesSnapshot(t *testing.T) {
 
 func TestRuntimeReloadWebRulesReturnsConfigurationErrorWhenSourceMissing(t *testing.T) {
 	rt := &Runtime{
-		config: config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
-		engine: rules.NewEngine(),
+		config:    config.Config{WebRules: config.WebRulesConfig{Enabled: false}},
+		engine:    rules.NewEngine(),
+		webSource: rulesources.WebSource{},
 	}
 
 	err := rt.ReloadWebRules(context.Background())
@@ -482,7 +486,7 @@ type runtimeWebSourceFixture struct {
 	err       error
 }
 
-func newRuntimeWebSource(t *testing.T, fixture runtimeWebSourceFixture) *rulesources.WebSource {
+func newRuntimeWebSource(t *testing.T, fixture runtimeWebSourceFixture) rulesources.WebSource {
 	t.Helper()
 
 	cachePath := fixture.cachePath
@@ -509,7 +513,7 @@ func newRuntimeWebSource(t *testing.T, fixture runtimeWebSourceFixture) *rulesou
 		}),
 	}
 
-	return &rulesources.WebSource{
+	return rulesources.WebSource{
 		URL:        "https://rules.example.com/list.txt",
 		CachePath:  cachePath,
 		HTTPClient: client,
