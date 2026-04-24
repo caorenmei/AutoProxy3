@@ -29,6 +29,7 @@ type runner struct {
 	config           config.Config
 	customRuleLoader customRuleLoader
 	autoDetectStore  autoDetectStore
+	webSource        *rulesources.WebSource
 }
 
 // New 基于给定配置创建最小可运行的运行时实例。
@@ -37,10 +38,19 @@ type runner struct {
 // 返回值实现 Runner 接口，可被命令行入口直接调用。
 // 当前骨架阶段仅保留配置与规则源依赖，以承接后续 serve 流程，因此通常不会返回错误。
 func New(cfg config.Config) (Runner, error) {
+	var webSource *rulesources.WebSource
+	if cfg.WebRules.Enabled {
+		webSource = &rulesources.WebSource{
+			URL:       cfg.WebRules.URL,
+			CachePath: cfg.WebRules.CachePath,
+		}
+	}
+
 	return runner{
 		config:           cfg,
 		customRuleLoader: rulesources.FileSource{},
 		autoDetectStore:  rulesources.AutoDetectStore{Path: cfg.AutoDetect.RulesPath},
+		webSource:        webSource,
 	}, nil
 }
 
@@ -48,6 +58,7 @@ func (r runner) Run(ctx context.Context) error {
 	_ = r.config
 	_ = r.customRuleLoader
 	_ = r.autoDetectStore
+	_ = r.webSource
 	if err := ctx.Err(); err != nil {
 		return err
 	}

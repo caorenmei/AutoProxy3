@@ -23,7 +23,15 @@ func TestNewReturnsRunnerThatRuns(t *testing.T) {
 }
 
 func TestNewPreparesRuleSourceDependencies(t *testing.T) {
-	cfg := config.Config{ListenAddr: "127.0.0.1:8080", AutoDetect: config.AutoDetectConfig{RulesPath: "/var/lib/autoproxy/auto.txt"}}
+	cfg := config.Config{
+		ListenAddr: "127.0.0.1:8080",
+		WebRules: config.WebRulesConfig{
+			Enabled:   true,
+			URL:       "https://rules.example.com/list.txt",
+			CachePath: "/var/lib/autoproxy/web_rules.txt",
+		},
+		AutoDetect: config.AutoDetectConfig{RulesPath: "/var/lib/autoproxy/auto.txt"},
+	}
 	runnerValue, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
@@ -42,6 +50,33 @@ func TestNewPreparesRuleSourceDependencies(t *testing.T) {
 	}
 	if store.Path != cfg.AutoDetect.RulesPath {
 		t.Fatalf("unexpected auto-detect rules path: got %q want %q", store.Path, cfg.AutoDetect.RulesPath)
+	}
+	if concrete.webSource == nil {
+		t.Fatal("expected web source")
+	}
+	if concrete.webSource.URL != cfg.WebRules.URL {
+		t.Fatalf("unexpected web source url: got %q want %q", concrete.webSource.URL, cfg.WebRules.URL)
+	}
+	if concrete.webSource.CachePath != cfg.WebRules.CachePath {
+		t.Fatalf("unexpected web source cache path: got %q want %q", concrete.webSource.CachePath, cfg.WebRules.CachePath)
+	}
+}
+
+func TestNewSkipsWebSourceWhenWebRulesDisabled(t *testing.T) {
+	runnerValue, err := New(config.Config{
+		ListenAddr: "127.0.0.1:8080",
+		WebRules:   config.WebRulesConfig{Enabled: false},
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	concrete, ok := runnerValue.(runner)
+	if !ok {
+		t.Fatalf("expected concrete runner, got %T", runnerValue)
+	}
+	if concrete.webSource != nil {
+		t.Fatalf("expected no web source, got %#v", concrete.webSource)
 	}
 }
 
