@@ -19,3 +19,21 @@ func TestNewReturnsRunnerThatRuns(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 }
+
+func TestRunReturnsContextErrorWhenCancelled(t *testing.T) {
+	runner, err := New(config.Config{ListenAddr: "127.0.0.1:8080"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = runner.Run(ctx)
+	if err == nil {
+		t.Fatal("expected context cancellation error")
+	}
+	if err != context.Canceled {
+		t.Fatalf("expected %v, got %v", context.Canceled, err)
+	}
+}

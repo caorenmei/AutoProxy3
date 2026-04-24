@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
 
 	"github.com/caorenmei/autoproxy3/src/internal/buildinfo"
@@ -38,6 +39,9 @@ type app struct {
 }
 
 var newRuntime = runtime.New
+var newServeContext = func() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt)
+}
 
 func newApp(handlers commandHandlers) app {
 	return newAppWithConfigLoader(handlers, loadConfigFromPath)
@@ -212,5 +216,8 @@ func defaultServe(_ appArgs, cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("create runtime: %w", err)
 	}
-	return runner.Run(context.Background())
+	ctx, cancel := newServeContext()
+	defer cancel()
+
+	return runner.Run(ctx)
 }

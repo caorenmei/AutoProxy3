@@ -372,6 +372,37 @@ func TestDefaultServeReturnsRunnerError(t *testing.T) {
 	}
 }
 
+func TestDefaultServePassesCancelledServeContextToRunner(t *testing.T) {
+	originalNewRuntime := newRuntime
+	originalNewServeContext := newServeContext
+	defer func() {
+		newRuntime = originalNewRuntime
+		newServeContext = originalNewServeContext
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	newServeContext = func() (context.Context, context.CancelFunc) {
+		return ctx, func() {}
+	}
+
+	newRuntime = func(config.Config) (runtime.Runner, error) {
+		return stubRuntimeRunner{
+			run: func(got context.Context) error {
+				if !errors.Is(got.Err(), context.Canceled) {
+					t.Fatalf("expected cancelled context, got %v", got.Err())
+				}
+				return got.Err()
+			},
+		}, nil
+	}
+
+	err := defaultServe(appArgs{mode: "serve"}, config.Config{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
 func TestRunMain(t *testing.T) {
 	tests := []struct {
 		name       string

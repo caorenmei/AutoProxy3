@@ -28,7 +28,10 @@ func New(cfg config.Config) (Runner, error) {
 	return runner{config: cfg}, nil
 }
 
-func (r runner) Run(context.Context) error {
+func (r runner) Run(ctx context.Context) error {
 	_ = r.config
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return nil
 }
