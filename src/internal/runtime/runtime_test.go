@@ -455,6 +455,52 @@ func TestRuntimeAutoDetectRecorderRefreshesEngineAfterStoreAppend(t *testing.T) 
 	}
 }
 
+func TestRuntimeAutoDetectRecorderSkipsLoadedFlagWhenHostAlreadyExists(t *testing.T) {
+	autoPath := filepath.Join(newRuntimeTestWorkspace(t), "auto.txt")
+	rt := &Runtime{
+		config: config.Config{
+			AutoDetect: config.AutoDetectConfig{Enabled: true, RulesPath: autoPath},
+		},
+		engine:          rules.NewEngine(),
+		autoDetectStore: rulesources.AutoDetectStore{Path: autoPath},
+	}
+	recorder := runtimeAutoDetectRecorder{runtime: rt}
+
+	if err := recorder.Record(context.Background(), "example.com"); err != nil {
+		t.Fatalf("first Record returned error: %v", err)
+	}
+	rt.autoDetectLoaded = false
+
+	if err := recorder.Record(context.Background(), "example.com"); err != nil {
+		t.Fatalf("second Record returned error: %v", err)
+	}
+	if rt.autoDetectLoaded {
+		t.Fatal("expected duplicate host to leave loaded flag unchanged")
+	}
+}
+
+func TestRuntimeAutoDetectRecorderReturnsStoreError(t *testing.T) {
+	workspace := newRuntimeTestWorkspace(t)
+	rt := &Runtime{
+		config: config.Config{
+			AutoDetect: config.AutoDetectConfig{
+				Enabled:   true,
+				RulesPath: filepath.Join(workspace, "missing", "auto.txt"),
+			},
+		},
+		engine:          rules.NewEngine(),
+		autoDetectStore: rulesources.AutoDetectStore{Path: filepath.Join(workspace, "missing", "auto.txt")},
+	}
+
+	err := runtimeAutoDetectRecorder{runtime: rt}.Record(context.Background(), "example.com")
+	if err == nil {
+		t.Fatal("expected store error")
+	}
+	if !strings.Contains(err.Error(), "open auto-detect rules file") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func newRuntimeTestWorkspace(t *testing.T) string {
 	t.Helper()
 

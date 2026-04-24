@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 
 	"github.com/caorenmei/autoproxy3/src/internal/buildinfo"
+	"github.com/caorenmei/autoproxy3/src/internal/cli"
 	"github.com/caorenmei/autoproxy3/src/internal/config"
 	"github.com/caorenmei/autoproxy3/src/internal/runtime"
 )
@@ -25,12 +27,13 @@ type serveHandler func(appArgs, config.Config) error
 
 type configLoader func(string) (config.Config, error)
 
-type reloadRulesHandler func() error
+type reloadRulesHandler func(config.Config) error
 
 type commandHandlers struct {
 	serve             serveHandler
 	reloadWebRules    reloadRulesHandler
 	reloadCustomRules reloadRulesHandler
+	reloadRules       reloadRulesHandler
 }
 
 type app struct {
@@ -52,14 +55,13 @@ func newAppWithConfigLoader(handlers commandHandlers, loader configLoader) app {
 		handlers.serve = defaultServe
 	}
 	if handlers.reloadWebRules == nil {
-		handlers.reloadWebRules = func() error {
-			return nil
-		}
+		handlers.reloadWebRules = defaultReloadWebRules
 	}
 	if handlers.reloadCustomRules == nil {
-		handlers.reloadCustomRules = func() error {
-			return nil
-		}
+		handlers.reloadCustomRules = defaultReloadCustomRules
+	}
+	if handlers.reloadRules == nil {
+		handlers.reloadRules = defaultReloadRules
 	}
 	if loader == nil {
 		loader = loadConfigFromPath
@@ -146,17 +148,32 @@ func (a app) run(args []string, stdout, stderr io.Writer) int {
 	case "help":
 		printHelp(stdout)
 	case "reload_web_rules":
-		if err := runReloadWebRules(a.handlers.reloadWebRules); err != nil {
+		cfg, err := a.loadConfig(parsed.configPath)
+		if err != nil {
+			fmt.Fprintln(stderr, fmt.Errorf("load config: %w", err))
+			return 1
+		}
+		if err := runReloadWebRules(cfg, a.handlers.reloadWebRules); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 	case "reload_custom_rules":
-		if err := runReloadCustomRules(a.handlers.reloadCustomRules); err != nil {
+		cfg, err := a.loadConfig(parsed.configPath)
+		if err != nil {
+			fmt.Fprintln(stderr, fmt.Errorf("load config: %w", err))
+			return 1
+		}
+		if err := runReloadCustomRules(cfg, a.handlers.reloadCustomRules); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 	case "reload_rules":
-		if err := runReloadRules(a.handlers.reloadWebRules, a.handlers.reloadCustomRules); err != nil {
+		cfg, err := a.loadConfig(parsed.configPath)
+		if err != nil {
+			fmt.Fprintln(stderr, fmt.Errorf("load config: %w", err))
+			return 1
+		}
+		if err := runReloadRulesCommand(cfg, a.handlers.reloadRules); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -187,25 +204,32 @@ func runServe(args appArgs, cfg config.Config, handler serveHandler) error {
 	return handler(args, cfg)
 }
 
-func runReloadWebRules(handler reloadRulesHandler) error {
+func runReloadWebRules(cfg config.Config, handler reloadRulesHandler) error {
 	if handler == nil {
 		return errors.New("reload web rules handler is not configured")
 	}
-	return handler()
+	return handler(cfg)
 }
 
-func runReloadCustomRules(handler reloadRulesHandler) error {
+func runReloadCustomRules(cfg config.Config, handler reloadRulesHandler) error {
 	if handler == nil {
 		return errors.New("reload custom rules handler is not configured")
 	}
-	return handler()
+	return handler(cfg)
 }
 
-func runReloadRules(reloadWebRules reloadRulesHandler, reloadCustomRules reloadRulesHandler) error {
-	if err := runReloadWebRules(reloadWebRules); err != nil {
+func runReloadRulesCommand(cfg config.Config, handler reloadRulesHandler) error {
+	if handler == nil {
+		return errors.New("reload rules handler is not configured")
+	}
+	return handler(cfg)
+}
+
+func runReloadRules(cfg config.Config, reloadWebRules reloadRulesHandler, reloadCustomRules reloadRulesHandler) error {
+	if err := runReloadWebRules(cfg, reloadWebRules); err != nil {
 		return fmt.Errorf("reload web rules: %w", err)
 	}
-	if err := runReloadCustomRules(reloadCustomRules); err != nil {
+	if err := runReloadCustomRules(cfg, reloadCustomRules); err != nil {
 		return fmt.Errorf("reload custom rules: %w", err)
 	}
 	return nil
@@ -220,4 +244,20 @@ func defaultServe(_ appArgs, cfg config.Config) error {
 	defer cancel()
 
 	return runner.Run(ctx)
+}
+
+func defaultReloadWebRules(cfg config.Config) error {
+	return newReloadClient(cfg).ReloadWebRules(context.Background())
+}
+
+func defaultReloadCustomRules(cfg config.Config) error {
+	return newReloadClient(cfg).ReloadCustomRules(context.Background())
+}
+
+func defaultReloadRules(cfg config.Config) error {
+	return newReloadClient(cfg).ReloadRules(context.Background())
+}
+
+func newReloadClient(cfg config.Config) *cli.Client {
+	return cli.NewClient(fmt.Sprintf("http://127.0.0.1:%d", cfg.Management.ListenPort), http.DefaultClient)
 }
