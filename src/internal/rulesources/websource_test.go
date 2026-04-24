@@ -482,6 +482,7 @@ func TestWebSourceRefreshOnceStopsWhenContextAlreadyCancelled(t *testing.T) {
 
 func TestWebSourceRefreshOnceStopsWhenContextCancelledDuringLoad(t *testing.T) {
 	requestStarted := make(chan struct{})
+	applyCalled := make(chan struct{}, 1)
 
 	source := WebSource{
 		URL:       "http://rules.example.com",
@@ -499,7 +500,10 @@ func TestWebSourceRefreshOnceStopsWhenContextCancelledDuringLoad(t *testing.T) {
 	result := make(chan bool, 1)
 	go func() {
 		result <- source.refreshOnce(ctx, func(rules.WebRuleSet) {
-			t.Fatal("expected canceled refresh to skip apply")
+			select {
+			case applyCalled <- struct{}{}:
+			default:
+			}
 		})
 	}()
 
@@ -515,6 +519,11 @@ func TestWebSourceRefreshOnceStopsWhenContextCancelledDuringLoad(t *testing.T) {
 	case keepGoing := <-result:
 		if keepGoing {
 			t.Fatal("expected canceled refresh to stop loop")
+		}
+		select {
+		case <-applyCalled:
+			t.Fatal("expected canceled refresh to skip apply")
+		default:
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for refresh result")

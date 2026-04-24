@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caorenmei/autoproxy3/src/internal/buildinfo"
 	"github.com/caorenmei/autoproxy3/src/internal/config"
@@ -368,13 +369,27 @@ func TestAppRunUsesDefaultReloadAllClient(t *testing.T) {
 		_ = server.Serve(listener)
 	}()
 
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
 	cfg := config.Config{Management: config.ManagementConfig{Enabled: true, ListenPort: listener.Addr().(*net.TCPAddr).Port}}
-	code := newAppWithConfigLoader(commandHandlers{}, func(string) (config.Config, error) { return cfg, nil }).run([]string{"autoproxy3", "reload_rules"}, io.Discard, io.Discard)
+	code := newAppWithConfigLoader(commandHandlers{}, func(string) (config.Config, error) { return cfg, nil }).run([]string{"autoproxy3", "reload_rules"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("unexpected exit code: %d", code)
+		t.Fatalf("unexpected exit code: got %d want %d, stderr=%q", code, 0, stderr.String())
 	}
-	if got := <-requests; got != "POST /reload_rules" {
-		t.Fatalf("unexpected request: %q", got)
+
+	select {
+	case got := <-requests:
+		if got != "POST /reload_rules" {
+			t.Fatalf("unexpected request: got %q want %q", got, "POST /reload_rules")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reload_rules request")
+	}
+
+	select {
+	case got := <-requests:
+		t.Fatalf("unexpected extra request: %q", got)
+	default:
 	}
 }
 
@@ -671,80 +686,6 @@ func TestRunReloadCustomRules(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			err := runReloadCustomRules(cfg, tc.handler)
 			assertErrorString(t, err, tc.wantErr)
-		})
-	}
-}
-
-func TestRunReloadRules(t *testing.T) {
-	reloadWebErr := errors.New("reload web failed")
-	reloadCustomErr := errors.New("reload custom failed")
-	cfg := config.Config{Management: config.ManagementConfig{Enabled: true, ListenPort: 9091}}
-
-	tests := []struct {
-		name          string
-		webHandler    func(config.Config) error
-		customHandler func(config.Config) error
-		wantErr       string
-		wantCounts    testCounters
-	}{
-		{
-			name:          "success",
-			webHandler:    func(config.Config) error { return nil },
-			customHandler: func(config.Config) error { return nil },
-			wantCounts:    testCounters{reloadWeb: 1, reloadCustom: 1},
-		},
-		{
-			name:       "missing web handler",
-			wantErr:    "reload web rules: reload web rules handler is not configured",
-			wantCounts: testCounters{},
-		},
-		{
-			name:       "missing custom handler",
-			webHandler: func(config.Config) error { return nil },
-			wantErr:    "reload custom rules: reload custom rules handler is not configured",
-			wantCounts: testCounters{reloadWeb: 1},
-		},
-		{
-			name:          "web handler error",
-			webHandler:    func(config.Config) error { return reloadWebErr },
-			customHandler: func(config.Config) error { return nil },
-			wantErr:       "reload web rules: reload web failed",
-			wantCounts:    testCounters{reloadWeb: 1},
-		},
-		{
-			name:          "custom handler error",
-			webHandler:    func(config.Config) error { return nil },
-			customHandler: func(config.Config) error { return reloadCustomErr },
-			wantErr:       "reload custom rules: reload custom failed",
-			wantCounts:    testCounters{reloadWeb: 1, reloadCustom: 1},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			counts := testCounters{}
-			webHandler := tc.webHandler
-			customHandler := tc.customHandler
-			if webHandler != nil {
-				original := webHandler
-				webHandler = func(cfg config.Config) error {
-					counts.reloadWeb++
-					return original(cfg)
-				}
-			}
-			if customHandler != nil {
-				original := customHandler
-				customHandler = func(cfg config.Config) error {
-					counts.reloadCustom++
-					return original(cfg)
-				}
-			}
-
-			err := runReloadRules(cfg, webHandler, customHandler)
-			assertErrorString(t, err, tc.wantErr)
-			if counts != tc.wantCounts {
-				t.Fatalf("unexpected counters: got %+v want %+v", counts, tc.wantCounts)
-			}
 		})
 	}
 }

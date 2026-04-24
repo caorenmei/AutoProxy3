@@ -225,16 +225,6 @@ func runReloadRulesCommand(cfg config.Config, handler reloadRulesHandler) error 
 	return handler(cfg)
 }
 
-func runReloadRules(cfg config.Config, reloadWebRules reloadRulesHandler, reloadCustomRules reloadRulesHandler) error {
-	if err := runReloadWebRules(cfg, reloadWebRules); err != nil {
-		return fmt.Errorf("reload web rules: %w", err)
-	}
-	if err := runReloadCustomRules(cfg, reloadCustomRules); err != nil {
-		return fmt.Errorf("reload custom rules: %w", err)
-	}
-	return nil
-}
-
 func defaultServe(_ appArgs, cfg config.Config) error {
 	runner, err := newRuntime(cfg)
 	if err != nil {
