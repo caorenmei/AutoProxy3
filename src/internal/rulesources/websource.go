@@ -87,8 +87,11 @@ func (s WebSource) StartRefreshLoop(ctx context.Context, interval time.Duration,
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if ctx.Err() != nil {
+					return
+				}
 				set, _, err := s.load(ctx)
-				if err == nil {
+				if err == nil && ctx.Err() == nil {
 					apply(set)
 				}
 			}

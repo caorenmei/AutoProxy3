@@ -408,6 +408,56 @@ func TestWebSourceStartRefreshLoopCancelsInFlightRequest(t *testing.T) {
 	}
 }
 
+func TestWebSourceStartRefreshLoopDoesNotApplyCacheFallbackAfterContextCancel(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "web_rules.txt")
+	cachedBody := encodedWebRules("[AutoProxy 0.2.9]", "||cached.example.com")
+	if err := os.WriteFile(cachePath, []byte(cachedBody), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	requestStarted := make(chan struct{})
+	requestCancelled := make(chan struct{})
+	applied := make(chan rules.WebRuleSet, 1)
+
+	source := WebSource{
+		URL:       "http://rules.example.com",
+		CachePath: cachePath,
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				close(requestStarted)
+				<-r.Context().Done()
+				close(requestCancelled)
+				return nil, r.Context().Err()
+			}),
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	source.StartRefreshLoop(ctx, 10*time.Millisecond, func(set rules.WebRuleSet) {
+		applied <- set
+	})
+
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for refresh request")
+	}
+
+	cancel()
+
+	select {
+	case <-requestCancelled:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected in-flight request to be cancelled")
+	}
+
+	select {
+	case set := <-applied:
+		t.Fatalf("expected cancelled refresh to skip apply, but got cached rule set: %+v", set)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
