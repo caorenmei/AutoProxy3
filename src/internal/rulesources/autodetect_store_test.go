@@ -26,6 +26,29 @@ func TestAutoDetectStoreAppendHostDeduplicates(t *testing.T) {
 	}
 }
 
+func TestAutoDetectStoreAppendHostRoundTripsHostPortThroughFileSource(t *testing.T) {
+	dir := t.TempDir()
+	customPath := filepath.Join(dir, "custom.txt")
+	autoPath := filepath.Join(dir, "auto.txt")
+	if err := os.WriteFile(customPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("write custom: %v", err)
+	}
+
+	store := AutoDetectStore{Path: autoPath}
+	if err := store.AppendHost(" Example.com:443 "); err != nil {
+		t.Fatalf("AppendHost returned error: %v", err)
+	}
+
+	source := FileSource{}
+	_, autoSet, err := source.LoadCustomAndAutoDetect(customPath, autoPath)
+	if err != nil {
+		t.Fatalf("LoadCustomAndAutoDetect returned error: %v", err)
+	}
+	if !autoSet.Match("example.com") {
+		t.Fatal("expected loaded auto-detect rules to match normalized host without port")
+	}
+}
+
 func TestAutoDetectStoreAppendHostIgnoresEmptyHost(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auto.txt")
 	store := AutoDetectStore{Path: path}

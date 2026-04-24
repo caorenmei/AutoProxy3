@@ -42,7 +42,7 @@ func TestFileSourceLoadCustomAndAutoDetectReturnsCustomOpenError(t *testing.T) {
 	}
 }
 
-func TestFileSourceLoadCustomAndAutoDetectReturnsAutoDetectOpenError(t *testing.T) {
+func TestFileSourceLoadCustomAndAutoDetectTreatsMissingAutoDetectFileAsEmptySet(t *testing.T) {
 	dir := t.TempDir()
 	customPath := filepath.Join(dir, "custom.txt")
 	if err := os.WriteFile(customPath, []byte("example.com\n"), 0o644); err != nil {
@@ -50,12 +50,15 @@ func TestFileSourceLoadCustomAndAutoDetectReturnsAutoDetectOpenError(t *testing.
 	}
 
 	source := FileSource{}
-	_, _, err := source.LoadCustomAndAutoDetect(customPath, filepath.Join(dir, "missing-auto.txt"))
-	if err == nil {
-		t.Fatal("expected error")
+	customSet, autoSet, err := source.LoadCustomAndAutoDetect(customPath, filepath.Join(dir, "missing-auto.txt"))
+	if err != nil {
+		t.Fatalf("LoadCustomAndAutoDetect returned error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "open auto-detect rules") {
-		t.Fatalf("expected auto-detect open error, got %v", err)
+	if !customSet.Match("example.com") {
+		t.Fatal("expected custom rules to remain available")
+	}
+	if autoSet.Match("example.com") {
+		t.Fatal("expected missing auto-detect file to load as empty set")
 	}
 }
 

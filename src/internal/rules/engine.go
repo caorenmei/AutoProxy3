@@ -136,7 +136,7 @@ func (e *Engine) ReplaceAutoDetectRules(set HostRuleSet) {
 // 并在未存在时以原子方式刷新内存快照。返回 true 表示快照发生变更；返回 false 表示
 // 输入为空或主机已存在。
 func (e *Engine) AddAutoDetectHost(host string) bool {
-	normalized := normalizeDecisionHost(host)
+	normalized := NormalizeAutoDetectHost(host)
 	if normalized == "" {
 		return false
 	}
@@ -226,7 +226,12 @@ func (s engineSnapshot) decideURL(rawURL string) Decision {
 	return Decision{Source: DecisionSourceDefault, Reason: DecisionReasonDirectDefault}
 }
 
-func normalizeDecisionHost(host string) string {
+// NormalizeAutoDetectHost 统一规范化自动探测主机名。
+//
+// 参数 host 可包含首尾空白、大小写差异、尾随点以及 host:port 形式；
+// 函数会移除这些差异，返回可用于自动探测规则存储与匹配的规范化主机名。
+// 当输入为空或仅包含空白时，返回空字符串。
+func NormalizeAutoDetectHost(host string) string {
 	trimmed := strings.TrimSpace(host)
 	if trimmed == "" {
 		return ""
@@ -241,6 +246,10 @@ func normalizeDecisionHost(host string) string {
 	}
 
 	return normalizeHost(trimmed)
+}
+
+func normalizeDecisionHost(host string) string {
+	return NormalizeAutoDetectHost(host)
 }
 
 func hostFromURL(rawURL string) string {

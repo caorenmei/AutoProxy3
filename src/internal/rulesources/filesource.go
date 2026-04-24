@@ -25,16 +25,19 @@ func (FileSource) LoadCustomAndAutoDetect(customPath, autoDetectPath string) (ru
 	}
 	defer customFile.Close()
 
-	autoDetectFile, err := os.Open(autoDetectPath)
-	if err != nil {
-		return rules.HostRuleSet{}, rules.HostRuleSet{}, fmt.Errorf("open auto-detect rules: %w", err)
-	}
-	defer autoDetectFile.Close()
-
 	customSet, err := rules.ParseHostRules(customFile)
 	if err != nil {
 		return rules.HostRuleSet{}, rules.HostRuleSet{}, fmt.Errorf("parse custom rules: %w", err)
 	}
+
+	autoDetectFile, err := os.Open(autoDetectPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return customSet, rules.HostRuleSet{}, nil
+		}
+		return rules.HostRuleSet{}, rules.HostRuleSet{}, fmt.Errorf("open auto-detect rules: %w", err)
+	}
+	defer autoDetectFile.Close()
 
 	autoDetectSet, err := rules.ParseHostRules(autoDetectFile)
 	if err != nil {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/caorenmei/autoproxy3/src/internal/rules"
 )
 
 // AutoDetectStore 表示 auto-detect 主机规则的文件持久化存储。
@@ -20,7 +22,7 @@ type AutoDetectStore struct {
 // 参数 host 为待持久化的主机名；函数会执行规范化并在输入为空时直接返回 nil。
 // 当文件中已存在相同主机时不会重复写入；新主机会按一行一个主机的格式追加到 Path 指定文件。
 func (s AutoDetectStore) AppendHost(host string) error {
-	normalized := normalizeStoredHost(host)
+	normalized := rules.NormalizeAutoDetectHost(host)
 	if normalized == "" {
 		return nil
 	}
@@ -43,13 +45,9 @@ func (s AutoDetectStore) AppendHost(host string) error {
 func containsStoredHost(content []byte, host string) bool {
 	scanner := bufio.NewScanner(strings.NewReader(string(content)))
 	for scanner.Scan() {
-		if normalizeStoredHost(scanner.Text()) == host {
+		if rules.NormalizeAutoDetectHost(scanner.Text()) == host {
 			return true
 		}
 	}
 	return false
-}
-
-func normalizeStoredHost(host string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 }
