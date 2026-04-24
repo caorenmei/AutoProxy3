@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -195,6 +196,12 @@ func TestReloadCustomRulesReturnsPartialFailure(t *testing.T) {
 	}
 	if response.Steps[0].Error == "" {
 		t.Fatalf("expected custom failure detail, got %+v", response.Steps)
+	}
+}
+
+func TestOptionsDoesNotExposeReloadAutoDetectRules(t *testing.T) {
+	if _, ok := reflect.TypeOf(Options{}).FieldByName("ReloadAutoDetectRules"); ok {
+		t.Fatal("expected management options to stop exposing reload auto-detect callback")
 	}
 }
 

@@ -60,15 +60,13 @@ type ActionResponse struct {
 //
 // Version 与 Features 用于首页展示；StatusProvider 用于提供规则状态快照；
 // ReloadCustomRules 负责统一处理 custom 与 auto-detect 本地规则重载。
-// ReloadAutoDetectRules 字段为兼容保留，Task 4 起不再由 HTTP 端点直接调用。
 type Options struct {
-	ListenPort            int
-	Version               string
-	Features              []string
-	StatusProvider        func() RuleStatusSummary
-	ReloadWebRules        func(context.Context) error
-	ReloadCustomRules     func(context.Context) error
-	ReloadAutoDetectRules func(context.Context) error
+	ListenPort        int
+	Version           string
+	Features          []string
+	StatusProvider    func() RuleStatusSummary
+	ReloadWebRules    func(context.Context) error
+	ReloadCustomRules func(context.Context) error
 }
 
 // Server 表示管理 HTTP 服务。

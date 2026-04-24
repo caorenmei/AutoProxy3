@@ -363,7 +363,6 @@ func (s *Server) persistAutoDetectHost(ctx context.Context, host string) {
 		s.logger.Error("record auto-detect host", "host", host, "error", err)
 		return
 	}
-	s.engine.AddAutoDetectHost(host)
 }
 
 func (s *Server) recordFailure(host string) int {

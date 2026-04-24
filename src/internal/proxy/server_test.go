@@ -278,9 +278,8 @@ func TestServerAutoDetectFallsBackAfterDirectDialFailuresAndRecordsHost(t *testi
 	if recorder.Count() != 1 || recorder.LastHost() != "autodetect.example" {
 		t.Fatalf("unexpected recorder state: count=%d host=%q", recorder.Count(), recorder.LastHost())
 	}
-	decision := server.engine.Decide("autodetect.example")
-	if decision.Source != rules.DecisionSourceAutoDetect {
-		t.Fatalf("expected engine to refresh auto-detect rule, got %+v", decision)
+	if decision := server.engine.Decide("autodetect.example"); decision.Source != rules.DecisionSourceDefault {
+		t.Fatalf("expected proxy to leave engine refresh to recorder chain, got %+v", decision)
 	}
 }
 

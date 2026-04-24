@@ -5,11 +5,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caorenmei/autoproxy3/src/internal/config"
 	"github.com/caorenmei/autoproxy3/src/internal/management"
@@ -100,6 +106,16 @@ func TestRuntimeFieldTypesMatchPlannedSources(t *testing.T) {
 	}
 }
 
+func TestRuntimeDoesNotExposeIndirectLoaderFields(t *testing.T) {
+	runtimeType := reflect.TypeOf(Runtime{})
+
+	for _, fieldName := range []string{"loadWebSource", "loadFileSource", "appendAutoDetectHost"} {
+		if _, ok := runtimeType.FieldByName(fieldName); ok {
+			t.Fatalf("expected runtime to stop exposing %q indirection field", fieldName)
+		}
+	}
+}
+
 func TestNewSkipsWebSourceWhenWebRulesDisabled(t *testing.T) {
 	runnerValue, err := New(config.Config{
 		ListenAddr: "127.0.0.1:8080",
@@ -137,16 +153,14 @@ func TestRunReturnsContextErrorWhenCancelled(t *testing.T) {
 }
 
 func TestRuntimeReloadCustomRulesReplacesSnapshots(t *testing.T) {
+	customPath, autoPath := writeRuntimeRuleFiles(t, "new-custom.example\n", "new-auto.example\n")
 	rt := &Runtime{
 		config: config.Config{
-			CustomRules: config.FileRulesConfig{Enabled: true, Path: "custom.txt"},
-			AutoDetect:  config.AutoDetectConfig{Enabled: true, RulesPath: "auto.txt"},
+			CustomRules: config.FileRulesConfig{Enabled: true, Path: customPath},
+			AutoDetect:  config.AutoDetectConfig{Enabled: true, RulesPath: autoPath},
 		},
 		engine:     rules.NewEngine(),
 		fileSource: rulesources.FileSource{},
-		loadFileSource: func(rulesources.FileSource, string, string) (rules.HostRuleSet, rules.HostRuleSet, error) {
-			return mustHostRuleSet(t, "new-custom.example"), mustHostRuleSet(t, "new-auto.example"), nil
-		},
 	}
 	rt.engine.ReplaceCustomRules(mustHostRuleSet(t, "old-custom.example"))
 	rt.engine.ReplaceAutoDetectRules(mustHostRuleSet(t, "old-auto.example"))
@@ -178,16 +192,14 @@ func TestRuntimeReloadCustomRulesReplacesSnapshots(t *testing.T) {
 }
 
 func TestRuntimeReloadCustomRulesKeepsOldSnapshotsOnFailure(t *testing.T) {
+	workspace := newRuntimeTestWorkspace(t)
 	rt := &Runtime{
 		config: config.Config{
-			CustomRules: config.FileRulesConfig{Enabled: true, Path: "custom.txt"},
-			AutoDetect:  config.AutoDetectConfig{Enabled: true, RulesPath: "auto.txt"},
+			CustomRules: config.FileRulesConfig{Enabled: true, Path: filepath.Join(workspace, "missing-custom.txt")},
+			AutoDetect:  config.AutoDetectConfig{Enabled: true, RulesPath: filepath.Join(workspace, "auto.txt")},
 		},
-		engine:     rules.NewEngine(),
-		fileSource: rulesources.FileSource{},
-		loadFileSource: func(rulesources.FileSource, string, string) (rules.HostRuleSet, rules.HostRuleSet, error) {
-			return rules.HostRuleSet{}, rules.HostRuleSet{}, errors.New("load failed")
-		},
+		engine:            rules.NewEngine(),
+		fileSource:        rulesources.FileSource{},
 		customRulesLoaded: true,
 		autoDetectLoaded:  true,
 	}
@@ -195,7 +207,7 @@ func TestRuntimeReloadCustomRulesKeepsOldSnapshotsOnFailure(t *testing.T) {
 	rt.engine.ReplaceAutoDetectRules(mustHostRuleSet(t, "old-auto.example"))
 
 	err := rt.ReloadCustomRules(context.Background())
-	if err == nil || err.Error() != "load failed" {
+	if err == nil || !strings.Contains(err.Error(), "open custom rules") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -213,13 +225,13 @@ func TestRuntimeReloadCustomRulesKeepsOldSnapshotsOnFailure(t *testing.T) {
 }
 
 func TestRuntimeReloadWebRulesReplacesSnapshot(t *testing.T) {
+	webSource := newRuntimeWebSource(t, runtimeWebSourceFixture{
+		body: mustEncodeWebRulesBody(t, "[AutoProxy 0.2.9]\n||new-web.example\n"),
+	})
 	rt := &Runtime{
 		config:    config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
 		engine:    rules.NewEngine(),
-		webSource: &rulesources.WebSource{},
-		loadWebSource: func(*rulesources.WebSource) (rules.WebRuleSet, bool, error) {
-			return mustWebRuleSet(t, "[AutoProxy 0.2.9]\n||new-web.example\n"), true, nil
-		},
+		webSource: webSource,
 	}
 	rt.engine.ReplaceWebRules(mustWebRuleSet(t, "[AutoProxy 0.2.9]\n||old-web.example\n"))
 
@@ -254,12 +266,11 @@ func TestRuntimeReloadWebRulesReturnsConfigurationErrorWhenSourceMissing(t *test
 
 func TestRuntimeReloadWebRulesReturnsContextError(t *testing.T) {
 	rt := &Runtime{
-		config:    config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
-		engine:    rules.NewEngine(),
-		webSource: &rulesources.WebSource{},
-		loadWebSource: func(*rulesources.WebSource) (rules.WebRuleSet, bool, error) {
-			return rules.WebRuleSet{}, false, nil
-		},
+		config: config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
+		engine: rules.NewEngine(),
+		webSource: newRuntimeWebSource(t, runtimeWebSourceFixture{
+			body: mustEncodeWebRulesBody(t, "[AutoProxy 0.2.9]\n||unused.example\n"),
+		}),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -272,19 +283,19 @@ func TestRuntimeReloadWebRulesReturnsContextError(t *testing.T) {
 }
 
 func TestRuntimeReloadWebRulesKeepsOldSnapshotOnLoadError(t *testing.T) {
+	webSource := newRuntimeWebSource(t, runtimeWebSourceFixture{
+		err: errors.New("download failed"),
+	})
 	rt := &Runtime{
-		config:    config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
-		engine:    rules.NewEngine(),
-		webSource: &rulesources.WebSource{},
-		loadWebSource: func(*rulesources.WebSource) (rules.WebRuleSet, bool, error) {
-			return rules.WebRuleSet{}, false, errors.New("download failed")
-		},
+		config:         config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
+		engine:         rules.NewEngine(),
+		webSource:      webSource,
 		webRulesLoaded: true,
 	}
 	rt.engine.ReplaceWebRules(mustWebRuleSet(t, "[AutoProxy 0.2.9]\n||old-web.example\n"))
 
 	err := rt.ReloadWebRules(context.Background())
-	if err == nil || err.Error() != "download failed" {
+	if err == nil || !strings.Contains(err.Error(), "download failed") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -301,9 +312,6 @@ func TestRuntimeReloadCustomRulesReturnsContextError(t *testing.T) {
 		config:     config.Config{},
 		engine:     rules.NewEngine(),
 		fileSource: rulesources.FileSource{},
-		loadFileSource: func(rulesources.FileSource, string, string) (rules.HostRuleSet, rules.HostRuleSet, error) {
-			return rules.HostRuleSet{}, rules.HostRuleSet{}, nil
-		},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -316,30 +324,30 @@ func TestRuntimeReloadCustomRulesReturnsContextError(t *testing.T) {
 }
 
 func TestNewWiresManagementServerToRuntimeCallbacks(t *testing.T) {
+	workspace := newRuntimeTestWorkspace(t)
 	cfg := config.Config{
 		ListenAddr: "127.0.0.1:8080",
 		WebRules: config.WebRulesConfig{
 			Enabled:   true,
 			URL:       "https://rules.example.com/list.txt",
-			CachePath: "web.txt",
+			CachePath: filepath.Join(workspace, "web-cache.txt"),
 		},
-		CustomRules: config.FileRulesConfig{Enabled: true, Path: "custom.txt"},
-		AutoDetect:  config.AutoDetectConfig{Enabled: true, RulesPath: "auto.txt"},
+		CustomRules: config.FileRulesConfig{Enabled: true, Path: filepath.Join(workspace, "custom.txt")},
+		AutoDetect:  config.AutoDetectConfig{Enabled: true, RulesPath: filepath.Join(workspace, "auto.txt")},
 		Management:  config.ManagementConfig{Enabled: true, ListenPort: 9091},
 	}
+	writeRuntimeRuleFile(t, cfg.CustomRules.Path, "custom.example\n")
+	writeRuntimeRuleFile(t, cfg.AutoDetect.RulesPath, "auto.example\n")
 	runnerValue, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 
 	rt := runnerValue.(*Runtime)
-	rt.webSource = &rulesources.WebSource{}
-	rt.loadWebSource = func(*rulesources.WebSource) (rules.WebRuleSet, bool, error) {
-		return mustWebRuleSet(t, "[AutoProxy 0.2.9]\n||web.example\n"), true, nil
-	}
-	rt.loadFileSource = func(rulesources.FileSource, string, string) (rules.HostRuleSet, rules.HostRuleSet, error) {
-		return mustHostRuleSet(t, "custom.example"), mustHostRuleSet(t, "auto.example"), nil
-	}
+	rt.webSource = newRuntimeWebSource(t, runtimeWebSourceFixture{
+		cachePath: cfg.WebRules.CachePath,
+		body:      mustEncodeWebRulesBody(t, "[AutoProxy 0.2.9]\n||web.example\n"),
+	})
 
 	reloadRecorder := httptest.NewRecorder()
 	reloadRequest := httptest.NewRequest(http.MethodPost, "/reload_rules", nil)
@@ -375,27 +383,148 @@ func TestNewWiresManagementServerToRuntimeCallbacks(t *testing.T) {
 }
 
 func TestRuntimeAutoDetectRecorderDelegatesToStore(t *testing.T) {
-	calls := 0
-	recorder := runtimeAutoDetectRecorder{
-		store: rulesources.AutoDetectStore{Path: "auto.txt"},
-		appendHost: func(store rulesources.AutoDetectStore, host string) error {
-			calls++
-			if store.Path != "auto.txt" {
-				t.Fatalf("unexpected store path: got %q want %q", store.Path, "auto.txt")
-			}
-			if host != "example.com" {
-				t.Fatalf("unexpected host: got %q want %q", host, "example.com")
-			}
-			return nil
-		},
+	autoPath := filepath.Join(newRuntimeTestWorkspace(t), "auto.txt")
+	rt := &Runtime{
+		config:          config.Config{AutoDetect: config.AutoDetectConfig{Enabled: true, RulesPath: autoPath}},
+		engine:          rules.NewEngine(),
+		autoDetectStore: rulesources.AutoDetectStore{Path: autoPath},
 	}
+	recorder := runtimeAutoDetectRecorder{runtime: rt}
 
 	if err := recorder.Record(context.Background(), "example.com"); err != nil {
 		t.Fatalf("Record returned error: %v", err)
 	}
-	if calls != 1 {
-		t.Fatalf("unexpected append call count: got %d want %d", calls, 1)
+	content, err := os.ReadFile(autoPath)
+	if err != nil {
+		t.Fatalf("read auto-detect store: %v", err)
 	}
+	if strings.TrimSpace(string(content)) != "example.com" {
+		t.Fatalf("unexpected persisted host: %q", string(content))
+	}
+}
+
+func TestRuntimeAutoDetectRecorderRefreshesEngineAfterStoreAppend(t *testing.T) {
+	workspace := newRuntimeTestWorkspace(t)
+	customPath := filepath.Join(workspace, "custom.txt")
+	autoPath := filepath.Join(workspace, "auto.txt")
+	if err := os.WriteFile(customPath, nil, 0o644); err != nil {
+		t.Fatalf("write custom rules: %v", err)
+	}
+
+	rt := &Runtime{
+		config: config.Config{
+			CustomRules: config.FileRulesConfig{Enabled: true, Path: customPath},
+			AutoDetect:  config.AutoDetectConfig{Enabled: true, RulesPath: autoPath},
+		},
+		engine:          rules.NewEngine(),
+		fileSource:      rulesources.FileSource{},
+		autoDetectStore: rulesources.AutoDetectStore{Path: autoPath},
+	}
+
+	recorder := rt.autoDetectRecorder()
+	if recorder == nil {
+		t.Fatal("expected auto-detect recorder")
+	}
+
+	if err := recorder.Record(context.Background(), " Recorder-Refresh.EXAMPLE:443 "); err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+
+	if got := rt.engine.Decide("recorder-refresh.example"); got.Source != rules.DecisionSourceAutoDetect {
+		t.Fatalf("expected recorder to refresh engine snapshot, got %+v", got)
+	}
+	if !rt.StatusSummary().AutoDetect.Loaded {
+		t.Fatal("expected auto-detect loaded state to become true")
+	}
+}
+
+func newRuntimeTestWorkspace(t *testing.T) string {
+	t.Helper()
+
+	baseDir := filepath.Join("test-artifacts", sanitizeTestName(t.Name())+"-"+strconv.FormatInt(time.Now().UnixNano(), 10))
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatalf("create runtime test workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(baseDir)
+	})
+	return baseDir
+}
+
+func sanitizeTestName(name string) string {
+	replacer := strings.NewReplacer("/", "-", " ", "-", ":", "-", "\\", "-")
+	return replacer.Replace(name)
+}
+
+func writeRuntimeRuleFiles(t *testing.T, customBody, autoBody string) (string, string) {
+	t.Helper()
+
+	workspace := newRuntimeTestWorkspace(t)
+	customPath := filepath.Join(workspace, "custom.txt")
+	autoPath := filepath.Join(workspace, "auto.txt")
+	writeRuntimeRuleFile(t, customPath, customBody)
+	writeRuntimeRuleFile(t, autoPath, autoBody)
+	return customPath, autoPath
+}
+
+func writeRuntimeRuleFile(t *testing.T, path, body string) {
+	t.Helper()
+
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write runtime rule file %s: %v", path, err)
+	}
+}
+
+type runtimeWebSourceFixture struct {
+	cachePath string
+	body      string
+	status    int
+	err       error
+}
+
+func newRuntimeWebSource(t *testing.T, fixture runtimeWebSourceFixture) *rulesources.WebSource {
+	t.Helper()
+
+	cachePath := fixture.cachePath
+	if cachePath == "" {
+		cachePath = filepath.Join(newRuntimeTestWorkspace(t), "web-cache.txt")
+	}
+
+	status := fixture.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+
+	client := &http.Client{
+		Transport: runtimeRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+			if fixture.err != nil {
+				return nil, fixture.err
+			}
+			return &http.Response{
+				StatusCode: status,
+				Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(fixture.body)),
+			}, nil
+		}),
+	}
+
+	return &rulesources.WebSource{
+		URL:        "https://rules.example.com/list.txt",
+		CachePath:  cachePath,
+		HTTPClient: client,
+	}
+}
+
+type runtimeRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f runtimeRoundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func mustEncodeWebRulesBody(t *testing.T, body string) string {
+	t.Helper()
+	return base64.StdEncoding.EncodeToString([]byte(body))
 }
 
 func mustHostRuleSet(t *testing.T, body string) rules.HostRuleSet {

@@ -40,10 +40,6 @@ type Runtime struct {
 	managementServer *management.Server
 	proxyServer      *proxy.Server
 
-	loadWebSource        func(*rulesources.WebSource) (rules.WebRuleSet, bool, error)
-	loadFileSource       func(rulesources.FileSource, string, string) (rules.HostRuleSet, rules.HostRuleSet, error)
-	appendAutoDetectHost func(rulesources.AutoDetectStore, string) error
-
 	statusMu          sync.RWMutex
 	webRulesLoaded    bool
 	customRulesLoaded bool
@@ -110,7 +106,7 @@ func (r *Runtime) ReloadWebRules(ctx context.Context) error {
 		return errWebRulesNotConfigured
 	}
 
-	set, _, err := r.loadWebRules()
+	set, _, err := r.webSource.Load()
 	if err != nil {
 		return err
 	}
@@ -130,7 +126,7 @@ func (r *Runtime) ReloadCustomRules(ctx context.Context) error {
 		return err
 	}
 
-	customSet, autoDetectSet, err := r.loadCustomAndAutoDetectRules(
+	customSet, autoDetectSet, err := r.fileSource.LoadCustomAndAutoDetect(
 		r.config.CustomRules.Path,
 		r.config.AutoDetect.RulesPath,
 	)
@@ -174,8 +170,7 @@ func (r *Runtime) autoDetectRecorder() proxy.AutoDetectRecorder {
 		return nil
 	}
 	return runtimeAutoDetectRecorder{
-		store:      r.autoDetectStore,
-		appendHost: r.appendAutoDetectHost,
+		runtime: r,
 	}
 }
 
@@ -202,28 +197,16 @@ func enabledFeatures(cfg config.Config) []string {
 	return features
 }
 
-func (r *Runtime) loadWebRules() (rules.WebRuleSet, bool, error) {
-	if r.loadWebSource != nil {
-		return r.loadWebSource(r.webSource)
-	}
-	return r.webSource.Load()
-}
-
-func (r *Runtime) loadCustomAndAutoDetectRules(customPath, autoDetectPath string) (rules.HostRuleSet, rules.HostRuleSet, error) {
-	if r.loadFileSource != nil {
-		return r.loadFileSource(r.fileSource, customPath, autoDetectPath)
-	}
-	return r.fileSource.LoadCustomAndAutoDetect(customPath, autoDetectPath)
-}
-
 type runtimeAutoDetectRecorder struct {
-	store      rulesources.AutoDetectStore
-	appendHost func(rulesources.AutoDetectStore, string) error
+	runtime *Runtime
 }
 
 func (r runtimeAutoDetectRecorder) Record(_ context.Context, host string) error {
-	if r.appendHost != nil {
-		return r.appendHost(r.store, host)
+	if err := r.runtime.autoDetectStore.AppendHost(host); err != nil {
+		return err
 	}
-	return r.store.AppendHost(host)
+	if r.runtime.engine.AddAutoDetectHost(host) {
+		r.runtime.setRuleLoaded(&r.runtime.autoDetectLoaded, r.runtime.config.AutoDetect.Enabled)
+	}
+	return nil
 }
