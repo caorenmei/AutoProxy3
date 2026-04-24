@@ -1,0 +1,31 @@
+{
+  "listen_addr": "localhost:1080",
+  "upstream_proxy": "http://127.0.0.1:7890",
+  "web_rules": {
+    "enabled": true,
+    "url": "https://example.com/autoproxy.txt",
+    "cache_path": "data/web-rules.txt",
+    "refresh_interval": 3600,
+    "download_on_start": true
+  },
+  "custom_rules": {
+    "enabled": true,
+    "path": "configs/custom-rules.txt"
+  },
+  "auto_detect": {
+    "enabled": false,
+    "max_attempts": 3,
+    "rules_path": "data/auto-detect-rules.txt"
+  },
+  "management": {
+    "enabled": true,
+    "listen_port": 9091
+  },
+  "logging": {
+    "level": "info",
+    "format": "text",
+    "file_path": "logs/autoproxy3.log",
+    "max_size": 10,
+    "max_backups": 5
+  }
+}
