@@ -25,18 +25,6 @@ type Runner interface {
 	Run(context.Context) error
 }
 
-type webRuleLoader interface {
-	Load() (rules.WebRuleSet, bool, error)
-}
-
-type fileRuleLoader interface {
-	LoadCustomAndAutoDetect(customPath, autoDetectPath string) (rules.HostRuleSet, rules.HostRuleSet, error)
-}
-
-type autoDetectStore interface {
-	AppendHost(host string) error
-}
-
 // Runtime 表示 AutoProxy3 的最小运行时编排器。
 //
 // 该类型持有规则引擎、规则源、管理服务与代理服务，并负责把规则重载、
@@ -45,12 +33,16 @@ type Runtime struct {
 	config config.Config
 
 	engine          *rules.Engine
-	webSource       webRuleLoader
-	fileSource      fileRuleLoader
-	autoDetectStore autoDetectStore
+	webSource       *rulesources.WebSource
+	fileSource      rulesources.FileSource
+	autoDetectStore rulesources.AutoDetectStore
 
 	managementServer *management.Server
 	proxyServer      *proxy.Server
+
+	loadWebSource        func(*rulesources.WebSource) (rules.WebRuleSet, bool, error)
+	loadFileSource       func(rulesources.FileSource, string, string) (rules.HostRuleSet, rules.HostRuleSet, error)
+	appendAutoDetectHost func(rulesources.AutoDetectStore, string) error
 
 	statusMu          sync.RWMutex
 	webRulesLoaded    bool
@@ -64,18 +56,16 @@ type Runtime struct {
 // 返回值实现 Runner 接口，并预先接好管理服务与代理服务的运行时依赖。
 func New(cfg config.Config) (Runner, error) {
 	rt := &Runtime{
-		config:     cfg,
-		engine:     rules.NewEngine(),
-		fileSource: rulesources.FileSource{},
+		config:          cfg,
+		engine:          rules.NewEngine(),
+		fileSource:      rulesources.FileSource{},
+		autoDetectStore: rulesources.AutoDetectStore{Path: cfg.AutoDetect.RulesPath},
 	}
 	if cfg.WebRules.Enabled {
 		rt.webSource = &rulesources.WebSource{
 			URL:       cfg.WebRules.URL,
 			CachePath: cfg.WebRules.CachePath,
 		}
-	}
-	if strings.TrimSpace(cfg.AutoDetect.RulesPath) != "" {
-		rt.autoDetectStore = rulesources.AutoDetectStore{Path: cfg.AutoDetect.RulesPath}
 	}
 
 	rt.managementServer = management.NewServer(management.Options{
@@ -120,7 +110,7 @@ func (r *Runtime) ReloadWebRules(ctx context.Context) error {
 		return errWebRulesNotConfigured
 	}
 
-	set, _, err := r.webSource.Load()
+	set, _, err := r.loadWebRules()
 	if err != nil {
 		return err
 	}
@@ -140,7 +130,7 @@ func (r *Runtime) ReloadCustomRules(ctx context.Context) error {
 		return err
 	}
 
-	customSet, autoDetectSet, err := r.fileSource.LoadCustomAndAutoDetect(
+	customSet, autoDetectSet, err := r.loadCustomAndAutoDetectRules(
 		r.config.CustomRules.Path,
 		r.config.AutoDetect.RulesPath,
 	)
@@ -180,10 +170,13 @@ func (r *Runtime) StatusSummary() management.RuleStatusSummary {
 }
 
 func (r *Runtime) autoDetectRecorder() proxy.AutoDetectRecorder {
-	if r.autoDetectStore == nil {
+	if strings.TrimSpace(r.autoDetectStore.Path) == "" {
 		return nil
 	}
-	return runtimeAutoDetectRecorder{store: r.autoDetectStore}
+	return runtimeAutoDetectRecorder{
+		store:      r.autoDetectStore,
+		appendHost: r.appendAutoDetectHost,
+	}
 }
 
 func (r *Runtime) setRuleLoaded(target *bool, loaded bool) {
@@ -209,10 +202,28 @@ func enabledFeatures(cfg config.Config) []string {
 	return features
 }
 
+func (r *Runtime) loadWebRules() (rules.WebRuleSet, bool, error) {
+	if r.loadWebSource != nil {
+		return r.loadWebSource(r.webSource)
+	}
+	return r.webSource.Load()
+}
+
+func (r *Runtime) loadCustomAndAutoDetectRules(customPath, autoDetectPath string) (rules.HostRuleSet, rules.HostRuleSet, error) {
+	if r.loadFileSource != nil {
+		return r.loadFileSource(r.fileSource, customPath, autoDetectPath)
+	}
+	return r.fileSource.LoadCustomAndAutoDetect(customPath, autoDetectPath)
+}
+
 type runtimeAutoDetectRecorder struct {
-	store autoDetectStore
+	store      rulesources.AutoDetectStore
+	appendHost func(rulesources.AutoDetectStore, string) error
 }
 
 func (r runtimeAutoDetectRecorder) Record(_ context.Context, host string) error {
+	if r.appendHost != nil {
+		return r.appendHost(r.store, host)
+	}
 	return r.store.AppendHost(host)
 }

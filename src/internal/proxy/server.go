@@ -359,15 +359,11 @@ func isTCPDialFailure(err error) bool {
 }
 
 func (s *Server) persistAutoDetectHost(ctx context.Context, host string) {
-	normalized := rules.NormalizeAutoDetectHost(host)
-	if normalized == "" {
+	if err := s.autoDetectRecorder.Record(ctx, host); err != nil {
+		s.logger.Error("record auto-detect host", "host", host, "error", err)
 		return
 	}
-	if err := s.autoDetectRecorder.Record(ctx, normalized); err != nil {
-		s.logger.Error("record auto-detect host", "host", normalized, "error", err)
-		return
-	}
-	s.engine.AddAutoDetectHost(normalized)
+	s.engine.AddAutoDetectHost(host)
 }
 
 func (s *Server) recordFailure(host string) int {

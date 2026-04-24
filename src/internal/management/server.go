@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 )
 
 // RuleState 表示单类规则源的当前状态。
@@ -103,10 +102,6 @@ func NewServer(opts Options) *Server {
 // 当请求路径未注册时，函数会沿用 http.ServeMux 的默认 404 行为。
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
-}
-
-func listenAddress(port int) string {
-	return "127.0.0.1:" + strconv.Itoa(port)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {

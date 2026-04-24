@@ -626,24 +626,6 @@ func TestServerAutoDetectPersistsHostForFileSourceReload(t *testing.T) {
 	}
 }
 
-func TestPersistAutoDetectHostSkipsEmptyNormalizedHost(t *testing.T) {
-	recorder := &memoryRecorder{}
-	server := NewServer(Options{
-		Engine:             rules.NewEngine(),
-		Logger:             newTestLogger(io.Discard),
-		AutoDetectRecorder: recorder,
-	})
-
-	server.persistAutoDetectHost(context.Background(), " \n\t ")
-
-	if recorder.Count() != 0 {
-		t.Fatalf("expected no persisted hosts, got %d", recorder.Count())
-	}
-	if got := server.engine.Decide("example.com"); got.Source != rules.DecisionSourceDefault {
-		t.Fatalf("expected engine to stay unchanged, got %+v", got)
-	}
-}
-
 func TestServerEndToEndWithFakeUpstream(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Target", "reachable")

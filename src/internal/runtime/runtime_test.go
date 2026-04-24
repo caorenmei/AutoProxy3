@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -49,28 +50,21 @@ func TestNewPreparesRuleSourceDependencies(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected concrete runner, got %T", runnerValue)
 	}
-	if concrete.fileSource == nil {
-		t.Fatal("expected custom rule loader")
+	if reflect.TypeOf(concrete.fileSource) != reflect.TypeOf(rulesources.FileSource{}) {
+		t.Fatalf("expected file source type %T, got %T", rulesources.FileSource{}, concrete.fileSource)
 	}
-	store, ok := concrete.autoDetectStore.(rulesources.AutoDetectStore)
-	if !ok {
-		t.Fatalf("expected auto-detect store type, got %T", concrete.autoDetectStore)
-	}
+	store := concrete.autoDetectStore
 	if store.Path != cfg.AutoDetect.RulesPath {
 		t.Fatalf("unexpected auto-detect rules path: got %q want %q", store.Path, cfg.AutoDetect.RulesPath)
 	}
 	if concrete.webSource == nil {
 		t.Fatal("expected web source")
 	}
-	webSource, ok := concrete.webSource.(*rulesources.WebSource)
-	if !ok {
-		t.Fatalf("expected web source type, got %T", concrete.webSource)
+	if concrete.webSource.URL != cfg.WebRules.URL {
+		t.Fatalf("unexpected web source url: got %q want %q", concrete.webSource.URL, cfg.WebRules.URL)
 	}
-	if webSource.URL != cfg.WebRules.URL {
-		t.Fatalf("unexpected web source url: got %q want %q", webSource.URL, cfg.WebRules.URL)
-	}
-	if webSource.CachePath != cfg.WebRules.CachePath {
-		t.Fatalf("unexpected web source cache path: got %q want %q", webSource.CachePath, cfg.WebRules.CachePath)
+	if concrete.webSource.CachePath != cfg.WebRules.CachePath {
+		t.Fatalf("unexpected web source cache path: got %q want %q", concrete.webSource.CachePath, cfg.WebRules.CachePath)
 	}
 	if concrete.engine == nil {
 		t.Fatal("expected rules engine")
@@ -80,6 +74,29 @@ func TestNewPreparesRuleSourceDependencies(t *testing.T) {
 	}
 	if concrete.proxyServer == nil {
 		t.Fatal("expected proxy server")
+	}
+}
+
+func TestRuntimeFieldTypesMatchPlannedSources(t *testing.T) {
+	runtimeType := reflect.TypeOf(Runtime{})
+
+	cases := []struct {
+		field string
+		want  reflect.Type
+	}{
+		{field: "webSource", want: reflect.TypeOf((*rulesources.WebSource)(nil))},
+		{field: "fileSource", want: reflect.TypeOf(rulesources.FileSource{})},
+		{field: "autoDetectStore", want: reflect.TypeOf(rulesources.AutoDetectStore{})},
+	}
+
+	for _, tc := range cases {
+		field, ok := runtimeType.FieldByName(tc.field)
+		if !ok {
+			t.Fatalf("expected field %q to exist", tc.field)
+		}
+		if field.Type != tc.want {
+			t.Fatalf("unexpected type for %s: got %v want %v", tc.field, field.Type, tc.want)
+		}
 	}
 }
 
@@ -126,7 +143,10 @@ func TestRuntimeReloadCustomRulesReplacesSnapshots(t *testing.T) {
 			AutoDetect:  config.AutoDetectConfig{Enabled: true, RulesPath: "auto.txt"},
 		},
 		engine:     rules.NewEngine(),
-		fileSource: stubFileSource{custom: mustHostRuleSet(t, "new-custom.example"), autoDetect: mustHostRuleSet(t, "new-auto.example")},
+		fileSource: rulesources.FileSource{},
+		loadFileSource: func(rulesources.FileSource, string, string) (rules.HostRuleSet, rules.HostRuleSet, error) {
+			return mustHostRuleSet(t, "new-custom.example"), mustHostRuleSet(t, "new-auto.example"), nil
+		},
 	}
 	rt.engine.ReplaceCustomRules(mustHostRuleSet(t, "old-custom.example"))
 	rt.engine.ReplaceAutoDetectRules(mustHostRuleSet(t, "old-auto.example"))
@@ -163,8 +183,11 @@ func TestRuntimeReloadCustomRulesKeepsOldSnapshotsOnFailure(t *testing.T) {
 			CustomRules: config.FileRulesConfig{Enabled: true, Path: "custom.txt"},
 			AutoDetect:  config.AutoDetectConfig{Enabled: true, RulesPath: "auto.txt"},
 		},
-		engine:            rules.NewEngine(),
-		fileSource:        stubFileSource{err: errors.New("load failed")},
+		engine:     rules.NewEngine(),
+		fileSource: rulesources.FileSource{},
+		loadFileSource: func(rulesources.FileSource, string, string) (rules.HostRuleSet, rules.HostRuleSet, error) {
+			return rules.HostRuleSet{}, rules.HostRuleSet{}, errors.New("load failed")
+		},
 		customRulesLoaded: true,
 		autoDetectLoaded:  true,
 	}
@@ -193,7 +216,10 @@ func TestRuntimeReloadWebRulesReplacesSnapshot(t *testing.T) {
 	rt := &Runtime{
 		config:    config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
 		engine:    rules.NewEngine(),
-		webSource: stubWebSource{set: mustWebRuleSet(t, "[AutoProxy 0.2.9]\n||new-web.example\n")},
+		webSource: &rulesources.WebSource{},
+		loadWebSource: func(*rulesources.WebSource) (rules.WebRuleSet, bool, error) {
+			return mustWebRuleSet(t, "[AutoProxy 0.2.9]\n||new-web.example\n"), true, nil
+		},
 	}
 	rt.engine.ReplaceWebRules(mustWebRuleSet(t, "[AutoProxy 0.2.9]\n||old-web.example\n"))
 
@@ -230,7 +256,10 @@ func TestRuntimeReloadWebRulesReturnsContextError(t *testing.T) {
 	rt := &Runtime{
 		config:    config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
 		engine:    rules.NewEngine(),
-		webSource: stubWebSource{},
+		webSource: &rulesources.WebSource{},
+		loadWebSource: func(*rulesources.WebSource) (rules.WebRuleSet, bool, error) {
+			return rules.WebRuleSet{}, false, nil
+		},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -244,9 +273,12 @@ func TestRuntimeReloadWebRulesReturnsContextError(t *testing.T) {
 
 func TestRuntimeReloadWebRulesKeepsOldSnapshotOnLoadError(t *testing.T) {
 	rt := &Runtime{
-		config:         config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
-		engine:         rules.NewEngine(),
-		webSource:      stubWebSource{err: errors.New("download failed")},
+		config:    config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
+		engine:    rules.NewEngine(),
+		webSource: &rulesources.WebSource{},
+		loadWebSource: func(*rulesources.WebSource) (rules.WebRuleSet, bool, error) {
+			return rules.WebRuleSet{}, false, errors.New("download failed")
+		},
 		webRulesLoaded: true,
 	}
 	rt.engine.ReplaceWebRules(mustWebRuleSet(t, "[AutoProxy 0.2.9]\n||old-web.example\n"))
@@ -268,7 +300,10 @@ func TestRuntimeReloadCustomRulesReturnsContextError(t *testing.T) {
 	rt := &Runtime{
 		config:     config.Config{},
 		engine:     rules.NewEngine(),
-		fileSource: stubFileSource{},
+		fileSource: rulesources.FileSource{},
+		loadFileSource: func(rulesources.FileSource, string, string) (rules.HostRuleSet, rules.HostRuleSet, error) {
+			return rules.HostRuleSet{}, rules.HostRuleSet{}, nil
+		},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -298,10 +333,12 @@ func TestNewWiresManagementServerToRuntimeCallbacks(t *testing.T) {
 	}
 
 	rt := runnerValue.(*Runtime)
-	rt.webSource = stubWebSource{set: mustWebRuleSet(t, "[AutoProxy 0.2.9]\n||web.example\n")}
-	rt.fileSource = stubFileSource{
-		custom:     mustHostRuleSet(t, "custom.example"),
-		autoDetect: mustHostRuleSet(t, "auto.example"),
+	rt.webSource = &rulesources.WebSource{}
+	rt.loadWebSource = func(*rulesources.WebSource) (rules.WebRuleSet, bool, error) {
+		return mustWebRuleSet(t, "[AutoProxy 0.2.9]\n||web.example\n"), true, nil
+	}
+	rt.loadFileSource = func(rulesources.FileSource, string, string) (rules.HostRuleSet, rules.HostRuleSet, error) {
+		return mustHostRuleSet(t, "custom.example"), mustHostRuleSet(t, "auto.example"), nil
 	}
 
 	reloadRecorder := httptest.NewRecorder()
@@ -338,50 +375,27 @@ func TestNewWiresManagementServerToRuntimeCallbacks(t *testing.T) {
 }
 
 func TestRuntimeAutoDetectRecorderDelegatesToStore(t *testing.T) {
-	store := &stubAutoDetectStore{}
-	recorder := runtimeAutoDetectRecorder{store: store}
+	calls := 0
+	recorder := runtimeAutoDetectRecorder{
+		store: rulesources.AutoDetectStore{Path: "auto.txt"},
+		appendHost: func(store rulesources.AutoDetectStore, host string) error {
+			calls++
+			if store.Path != "auto.txt" {
+				t.Fatalf("unexpected store path: got %q want %q", store.Path, "auto.txt")
+			}
+			if host != "example.com" {
+				t.Fatalf("unexpected host: got %q want %q", host, "example.com")
+			}
+			return nil
+		},
+	}
 
 	if err := recorder.Record(context.Background(), "example.com"); err != nil {
 		t.Fatalf("Record returned error: %v", err)
 	}
-	if store.host != "example.com" {
-		t.Fatalf("unexpected stored host: got %q want %q", store.host, "example.com")
+	if calls != 1 {
+		t.Fatalf("unexpected append call count: got %d want %d", calls, 1)
 	}
-}
-
-type stubFileSource struct {
-	custom     rules.HostRuleSet
-	autoDetect rules.HostRuleSet
-	err        error
-}
-
-func (s stubFileSource) LoadCustomAndAutoDetect(string, string) (rules.HostRuleSet, rules.HostRuleSet, error) {
-	if s.err != nil {
-		return rules.HostRuleSet{}, rules.HostRuleSet{}, s.err
-	}
-	return s.custom, s.autoDetect, nil
-}
-
-type stubWebSource struct {
-	set rules.WebRuleSet
-	err error
-}
-
-func (s stubWebSource) Load() (rules.WebRuleSet, bool, error) {
-	if s.err != nil {
-		return rules.WebRuleSet{}, false, s.err
-	}
-	return s.set, true, nil
-}
-
-type stubAutoDetectStore struct {
-	host string
-	err  error
-}
-
-func (s *stubAutoDetectStore) AppendHost(host string) error {
-	s.host = host
-	return s.err
 }
 
 func mustHostRuleSet(t *testing.T, body string) rules.HostRuleSet {

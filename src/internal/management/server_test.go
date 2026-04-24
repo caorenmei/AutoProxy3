@@ -9,12 +9,6 @@ import (
 	"testing"
 )
 
-func TestListenAddressUsesLoopback(t *testing.T) {
-	if got := listenAddress(9091); got != "127.0.0.1:9091" {
-		t.Fatalf("unexpected listen address: got %q want %q", got, "127.0.0.1:9091")
-	}
-}
-
 func TestServerIndexReturnsJSON(t *testing.T) {
 	server := NewServer(Options{
 		ListenPort: 9091,
