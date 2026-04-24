@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/caorenmei/autoproxy3/src/internal/buildinfo"
 	"github.com/caorenmei/autoproxy3/src/internal/config"
+	"github.com/caorenmei/autoproxy3/src/internal/runtime"
 )
 
 type testCounters struct {
@@ -287,6 +289,86 @@ func TestAppRunDispatchesCommands(t *testing.T) {
 				t.Fatalf("unexpected counters: got %+v want %+v", counts, tc.wantCounts)
 			}
 		})
+	}
+}
+
+func TestNewAppWithConfigLoaderUsesDefaultServe(t *testing.T) {
+	originalNewRuntime := newRuntime
+	defer func() {
+		newRuntime = originalNewRuntime
+	}()
+
+	wantCfg := config.Config{ListenAddr: "127.0.0.1:8080"}
+	created := false
+	ran := false
+	newRuntime = func(cfg config.Config) (runtime.Runner, error) {
+		created = true
+		if cfg != wantCfg {
+			t.Fatalf("unexpected config: %+v", cfg)
+		}
+		return stubRuntimeRunner{
+			run: func(ctx context.Context) error {
+				if ctx == nil {
+					t.Fatal("expected context")
+				}
+				ran = true
+				return nil
+			},
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := newAppWithConfigLoader(commandHandlers{}, func(string) (config.Config, error) {
+		return wantCfg, nil
+	}).run([]string{"autoproxy3", "serve"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("unexpected exit code: got %d want %d", code, 0)
+	}
+	if !created {
+		t.Fatal("expected runtime to be created")
+	}
+	if !ran {
+		t.Fatal("expected runtime runner to run")
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("unexpected stdout: %q", got)
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("unexpected stderr: %q", got)
+	}
+}
+
+func TestDefaultServeReturnsRuntimeCreationError(t *testing.T) {
+	originalNewRuntime := newRuntime
+	defer func() {
+		newRuntime = originalNewRuntime
+	}()
+
+	newRuntimeErr := errors.New("new runtime failed")
+	newRuntime = func(config.Config) (runtime.Runner, error) {
+		return nil, newRuntimeErr
+	}
+
+	err := defaultServe(appArgs{mode: "serve"}, config.Config{})
+	assertErrorString(t, err, "create runtime: new runtime failed")
+}
+
+func TestDefaultServeReturnsRunnerError(t *testing.T) {
+	originalNewRuntime := newRuntime
+	defer func() {
+		newRuntime = originalNewRuntime
+	}()
+
+	runErr := errors.New("run failed")
+	newRuntime = func(config.Config) (runtime.Runner, error) {
+		return stubRuntimeRunner{run: func(context.Context) error { return runErr }}, nil
+	}
+
+	err := defaultServe(appArgs{mode: "serve"}, config.Config{})
+	if !errors.Is(err, runErr) {
+		t.Fatalf("expected runner error %v, got %v", runErr, err)
 	}
 }
 
@@ -642,4 +724,15 @@ func assertErrorString(t *testing.T, err error, want string) {
 	if err.Error() != want {
 		t.Fatalf("expected error %q, got %q", want, err.Error())
 	}
+}
+
+type stubRuntimeRunner struct {
+	run func(context.Context) error
+}
+
+func (r stubRuntimeRunner) Run(ctx context.Context) error {
+	if r.run == nil {
+		return nil
+	}
+	return r.run(ctx)
 }

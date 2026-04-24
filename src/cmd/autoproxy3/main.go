@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/caorenmei/autoproxy3/src/internal/buildinfo"
 	"github.com/caorenmei/autoproxy3/src/internal/config"
+	"github.com/caorenmei/autoproxy3/src/internal/runtime"
 )
 
 type appArgs struct {
@@ -35,15 +37,15 @@ type app struct {
 	loadConfig configLoader
 }
 
+var newRuntime = runtime.New
+
 func newApp(handlers commandHandlers) app {
 	return newAppWithConfigLoader(handlers, loadConfigFromPath)
 }
 
 func newAppWithConfigLoader(handlers commandHandlers, loader configLoader) app {
 	if handlers.serve == nil {
-		handlers.serve = func(appArgs, config.Config) error {
-			return nil
-		}
+		handlers.serve = defaultServe
 	}
 	if handlers.reloadWebRules == nil {
 		handlers.reloadWebRules = func() error {
@@ -203,4 +205,12 @@ func runReloadRules(reloadWebRules reloadRulesHandler, reloadCustomRules reloadR
 		return fmt.Errorf("reload custom rules: %w", err)
 	}
 	return nil
+}
+
+func defaultServe(_ appArgs, cfg config.Config) error {
+	runner, err := newRuntime(cfg)
+	if err != nil {
+		return fmt.Errorf("create runtime: %w", err)
+	}
+	return runner.Run(context.Background())
 }
