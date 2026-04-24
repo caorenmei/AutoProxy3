@@ -284,7 +284,7 @@ func TestWebSourceStartRefreshLoopSkipsFailedLoads(t *testing.T) {
 	}
 }
 
-func TestWebSourceStartRefreshLoopSkipsCacheFallbackResults(t *testing.T) {
+func TestWebSourceStartRefreshLoopAppliesCacheFallbackResults(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), "web_rules.txt")
 	cachedBody := encodedWebRules("[AutoProxy 0.2.9]", "||cached.example.com")
 	if err := os.WriteFile(cachePath, []byte(cachedBody), 0o644); err != nil {
@@ -294,19 +294,23 @@ func TestWebSourceStartRefreshLoopSkipsCacheFallbackResults(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	applied := make(chan struct{}, 1)
+	applied := make(chan rules.WebRuleSet, 1)
 	source := WebSource{
 		URL:       "://bad-url",
 		CachePath: cachePath,
 	}
-	source.StartRefreshLoop(ctx, 10*time.Millisecond, func(rules.WebRuleSet) {
-		applied <- struct{}{}
+	source.StartRefreshLoop(ctx, 10*time.Millisecond, func(set rules.WebRuleSet) {
+		applied <- set
+		cancel()
 	})
 
 	select {
-	case <-applied:
-		t.Fatal("expected cache fallback refresh to skip apply")
-	case <-time.After(50 * time.Millisecond):
+	case set := <-applied:
+		if !set.ProxyHost("cached.example.com") {
+			t.Fatal("expected applied set to contain cached rule")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for apply")
 	}
 }
 
