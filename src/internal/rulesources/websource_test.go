@@ -458,6 +458,69 @@ func TestWebSourceStartRefreshLoopDoesNotApplyCacheFallbackAfterContextCancel(t 
 	}
 }
 
+func TestWebSourceRefreshOnceStopsWhenContextAlreadyCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	source := WebSource{
+		URL:       "http://rules.example.com",
+		CachePath: filepath.Join(t.TempDir(), "missing.txt"),
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("expected canceled refresh to stop before load")
+				return nil, nil
+			}),
+		},
+	}
+
+	if keepGoing := source.refreshOnce(ctx, func(rules.WebRuleSet) {
+		t.Fatal("expected canceled refresh to skip apply")
+	}); keepGoing {
+		t.Fatal("expected canceled refresh to stop loop")
+	}
+}
+
+func TestWebSourceRefreshOnceStopsWhenContextCancelledDuringLoad(t *testing.T) {
+	requestStarted := make(chan struct{})
+
+	source := WebSource{
+		URL:       "http://rules.example.com",
+		CachePath: filepath.Join(t.TempDir(), "missing.txt"),
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				close(requestStarted)
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			}),
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan bool, 1)
+	go func() {
+		result <- source.refreshOnce(ctx, func(rules.WebRuleSet) {
+			t.Fatal("expected canceled refresh to skip apply")
+		})
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for refresh request")
+	}
+
+	cancel()
+
+	select {
+	case keepGoing := <-result:
+		if keepGoing {
+			t.Fatal("expected canceled refresh to stop loop")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for refresh result")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {

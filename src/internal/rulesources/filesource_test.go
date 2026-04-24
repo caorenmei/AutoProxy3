@@ -62,6 +62,23 @@ func TestFileSourceLoadCustomAndAutoDetectTreatsMissingAutoDetectFileAsEmptySet(
 	}
 }
 
+func TestFileSourceLoadCustomAndAutoDetectReturnsAutoDetectOpenError(t *testing.T) {
+	dir := t.TempDir()
+	customPath := filepath.Join(dir, "custom.txt")
+	if err := os.WriteFile(customPath, []byte("example.com\n"), 0o644); err != nil {
+		t.Fatalf("write custom: %v", err)
+	}
+
+	source := FileSource{}
+	_, _, err := source.LoadCustomAndAutoDetect(customPath, filepath.Join(customPath, "auto.txt"))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "open auto-detect rules") {
+		t.Fatalf("expected auto-detect open error, got %v", err)
+	}
+}
+
 func TestFileSourceLoadCustomAndAutoDetectReturnsCustomParseError(t *testing.T) {
 	dir := t.TempDir()
 	autoPath := filepath.Join(dir, "auto.txt")

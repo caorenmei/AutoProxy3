@@ -87,16 +87,26 @@ func (s WebSource) StartRefreshLoop(ctx context.Context, interval time.Duration,
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if ctx.Err() != nil {
+				if !s.refreshOnce(ctx, apply) {
 					return
-				}
-				set, _, err := s.load(ctx)
-				if err == nil && ctx.Err() == nil {
-					apply(set)
 				}
 			}
 		}
 	}()
+}
+
+func (s WebSource) refreshOnce(ctx context.Context, apply func(rules.WebRuleSet)) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	set, _, err := s.load(ctx)
+	if ctx.Err() != nil {
+		return false
+	}
+	if err == nil && ctx.Err() == nil {
+		apply(set)
+	}
+	return true
 }
 
 func (s WebSource) httpClient() *http.Client {
