@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +22,7 @@ import (
 	"time"
 
 	"github.com/caorenmei/autoproxy3/src/internal/rules"
+	"github.com/caorenmei/autoproxy3/src/internal/rulesources"
 )
 
 func TestServerHTTPDirectSuccess(t *testing.T) {
@@ -572,6 +575,72 @@ func TestServerAutoDetectStoreFailureLogsErrorAndDoesNotRefreshRule(t *testing.T
 	decision := server.engine.Decide("record-fail.example")
 	if decision.Source != rules.DecisionSourceDefault {
 		t.Fatalf("expected rule refresh to stay inactive, got %+v", decision)
+	}
+}
+
+func TestServerAutoDetectPersistsHostForFileSourceReload(t *testing.T) {
+	dir := t.TempDir()
+	customPath := filepath.Join(dir, "custom.txt")
+	autoPath := filepath.Join(dir, "auto.txt")
+	if err := os.WriteFile(customPath, nil, 0o644); err != nil {
+		t.Fatalf("write custom rules file: %v", err)
+	}
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "persisted-auto-detect-ok")
+	}))
+	defer target.Close()
+
+	upstream := newFakeUpstream(t, map[string]string{"persisted-auto-detect.example:80": strings.TrimPrefix(target.URL, "http://")})
+	defer upstream.Close()
+
+	server := NewServer(Options{
+		Engine:                rules.NewEngine(),
+		Logger:                newTestLogger(io.Discard),
+		UpstreamProxy:         upstream.Address(),
+		AutoDetectEnabled:     true,
+		AutoDetectMaxAttempts: 1,
+		AutoDetectRecorder: recorderFunc(func(context.Context, string) error {
+			return rulesources.AutoDetectStore{Path: autoPath}.AppendHost("Persisted-Auto-Detect.EXAMPLE")
+		}),
+		DialContext: failingDialerForHost(t, "persisted-auto-detect.example"),
+	})
+	proxyServer := httptest.NewServer(server)
+	defer proxyServer.Close()
+
+	resp, body := mustDoProxyRequest(t, proxyServer.URL, "http://persisted-auto-detect.example/test")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if body != "persisted-auto-detect-ok" {
+		t.Fatalf("unexpected body: %q", body)
+	}
+
+	_, autoDetectSet, err := (rulesources.FileSource{}).LoadCustomAndAutoDetect(customPath, autoPath)
+	if err != nil {
+		t.Fatalf("reload persisted auto-detect rules: %v", err)
+	}
+	if !autoDetectSet.Match("persisted-auto-detect.example") {
+		t.Fatal("expected persisted auto-detect rule to reload from file")
+	}
+}
+
+func TestPersistAutoDetectHostSkipsEmptyNormalizedHost(t *testing.T) {
+	recorder := &memoryRecorder{}
+	server := NewServer(Options{
+		Engine:             rules.NewEngine(),
+		Logger:             newTestLogger(io.Discard),
+		AutoDetectRecorder: recorder,
+	})
+
+	server.persistAutoDetectHost(context.Background(), " \n\t ")
+
+	if recorder.Count() != 0 {
+		t.Fatalf("expected no persisted hosts, got %d", recorder.Count())
+	}
+	if got := server.engine.Decide("example.com"); got.Source != rules.DecisionSourceDefault {
+		t.Fatalf("expected engine to stay unchanged, got %+v", got)
 	}
 }
 
