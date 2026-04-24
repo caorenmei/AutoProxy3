@@ -102,7 +102,7 @@ func (r *Runtime) ReloadWebRules(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !r.config.WebRules.Enabled {
+	if !r.config.WebRules.Enabled || strings.TrimSpace(r.webSource.URL) == "" {
 		return errWebRulesNotConfigured
 	}
 

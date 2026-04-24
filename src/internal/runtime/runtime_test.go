@@ -255,9 +255,22 @@ func TestRuntimeReloadWebRulesReplacesSnapshot(t *testing.T) {
 	}
 }
 
-func TestRuntimeReloadWebRulesReturnsConfigurationErrorWhenSourceMissing(t *testing.T) {
+func TestRuntimeReloadWebRulesReturnsConfigurationErrorWhenWebRulesDisabled(t *testing.T) {
 	rt := &Runtime{
 		config:    config.Config{WebRules: config.WebRulesConfig{Enabled: false}},
+		engine:    rules.NewEngine(),
+		webSource: rulesources.WebSource{},
+	}
+
+	err := rt.ReloadWebRules(context.Background())
+	if !errors.Is(err, errWebRulesNotConfigured) {
+		t.Fatalf("expected %v, got %v", errWebRulesNotConfigured, err)
+	}
+}
+
+func TestRuntimeReloadWebRulesReturnsConfigurationErrorWhenSourceZeroValue(t *testing.T) {
+	rt := &Runtime{
+		config:    config.Config{WebRules: config.WebRulesConfig{Enabled: true}},
 		engine:    rules.NewEngine(),
 		webSource: rulesources.WebSource{},
 	}
